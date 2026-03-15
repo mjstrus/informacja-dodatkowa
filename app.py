@@ -484,23 +484,35 @@ def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
 # GŁÓWNY INTERFEJS STREAMLIT
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ── Odczyt kluczy z Streamlit Secrets (jeśli ustawione) ─────────────────────
+_anthropic_from_secrets = st.secrets.get("ANTHROPIC_API_KEY", "")
+_llama_from_secrets = st.secrets.get("LLAMA_API_KEY", "")
+
 # ── Sidebar: Konfiguracja ────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Konfiguracja")
 
-    anthropic_key = st.text_input(
-        "🔑 Klucz API Anthropic",
-        type="password",
-        placeholder="sk-ant-...",
-        help="Wymagany do generowania przez Claude 3.5 Sonnet"
-    )
+    if _anthropic_from_secrets:
+        st.success("🔑 Klucz API Anthropic: wczytany automatycznie")
+        anthropic_key = _anthropic_from_secrets
+    else:
+        anthropic_key = st.text_input(
+            "🔑 Klucz API Anthropic",
+            type="password",
+            placeholder="sk-ant-...",
+            help="Wymagany do generowania przez Claude 3.5 Sonnet"
+        )
 
-    llama_key = st.text_input(
-        "🦙 Klucz API LlamaParse (opcjonalny)",
-        type="password",
-        placeholder="llx-...",
-        help="Dla lepszej ekstrakcji tabel. Bez niego użyty zostanie pypdf."
-    )
+    if _llama_from_secrets:
+        st.success("🦙 Klucz LlamaParse: wczytany automatycznie")
+        llama_key = _llama_from_secrets
+    else:
+        llama_key = st.text_input(
+            "🦙 Klucz API LlamaParse (opcjonalny)",
+            type="password",
+            placeholder="llx-...",
+            help="Dla lepszej ekstrakcji tabel. Bez niego użyty zostanie pypdf."
+        )
 
     st.divider()
     st.subheader("🏢 Dane jednostki")
