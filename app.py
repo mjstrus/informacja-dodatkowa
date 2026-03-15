@@ -1,0 +1,712 @@
+"""
+Automatyzator Informacji Dodatkowej do sprawozdania finansowego
+Streamlit app z Claude 3.5 Sonnet + LlamaParse + python-docx
+"""
+
+import streamlit as st
+import anthropic
+import os
+import io
+import json
+import re
+import tempfile
+from pathlib import Path
+from docx import Document
+from docx.shared import Pt, Inches, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+import base64
+
+# ─── PAGE CONFIG ────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Generator Informacji Dodatkowej",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ─── STYLES ─────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #2d6a9f 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 12px;
+        margin-bottom: 2rem;
+        text-align: center;
+    }
+    .step-card {
+        background: #f8f9fa;
+        border-left: 4px solid #2d6a9f;
+        padding: 1rem 1.5rem;
+        border-radius: 0 8px 8px 0;
+        margin: 0.5rem 0;
+    }
+    .validation-ok { color: #28a745; font-weight: bold; }
+    .validation-warn { color: #ffc107; font-weight: bold; }
+    .validation-err { color: #dc3545; font-weight: bold; }
+    .metric-box {
+        background: white;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 1rem;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .stProgress > div > div { background-color: #2d6a9f; }
+</style>
+""", unsafe_allow_html=True)
+
+# ─── HEADER ─────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="main-header">
+    <h1>📊 Generator Informacji Dodatkowej</h1>
+    <p>Automatyczne tworzenie not do sprawozdania finansowego zgodnie z Ustawą o Rachunkowości</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODUŁ 1: PARSOWANIE PDF
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def extract_text_from_pdf_basic(pdf_bytes: bytes, filename: str) -> str:
+    """Ekstrakcja tekstu z PDF przy użyciu pypdf (fallback bez LlamaParse)."""
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        text_parts = [f"=== DOKUMENT: {filename} ===\n"]
+        for i, page in enumerate(reader.pages):
+            page_text = page.extract_text() or ""
+            if page_text.strip():
+                text_parts.append(f"\n--- Strona {i+1} ---\n{page_text}")
+        return "\n".join(text_parts)
+    except Exception as e:
+        return f"[BŁĄD ekstrakcji {filename}: {e}]"
+
+
+def parse_documents_llamaparse(pdf_files: list, llama_api_key: str, progress_callback=None) -> dict:
+    """
+    Krok 1 & 2: Parsowanie PDF przez LlamaParse + identyfikacja dokumentów.
+    Zwraca słownik: {nazwa_pliku: tekst_markdown}
+    """
+    try:
+        from llama_parse import LlamaParse
+        parser = LlamaParse(
+            api_key=llama_api_key,
+            result_type="markdown",
+            language="pl",
+            parsing_instruction=(
+                "Dokument to sprawozdanie finansowe polskiej spółki. "
+                "Zachowaj strukturę tabel finansowych. "
+                "Oznacz wyraźnie: BILANS, RACHUNEK ZYSKÓW I STRAT, NOTY."
+            )
+        )
+        results = {}
+        for idx, uploaded_file in enumerate(pdf_files):
+            if progress_callback:
+                progress_callback(idx / len(pdf_files), f"Parsowanie: {uploaded_file.name}")
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(uploaded_file.getvalue())
+                tmp_path = tmp.name
+            try:
+                docs = parser.load_data(tmp_path)
+                results[uploaded_file.name] = "\n\n".join(d.text for d in docs)
+            finally:
+                os.unlink(tmp_path)
+        return results
+    except ImportError:
+        st.warning("⚠️ LlamaParse niedostępny – używam pypdf jako fallback.")
+        return parse_documents_fallback(pdf_files, progress_callback)
+    except Exception as e:
+        st.warning(f"⚠️ Błąd LlamaParse ({e}) – używam pypdf jako fallback.")
+        return parse_documents_fallback(pdf_files, progress_callback)
+
+
+def parse_documents_fallback(pdf_files: list, progress_callback=None) -> dict:
+    """Fallback: ekstrakcja przez pypdf."""
+    results = {}
+    for idx, uploaded_file in enumerate(pdf_files):
+        if progress_callback:
+            progress_callback(idx / len(pdf_files), f"Ekstrakcja: {uploaded_file.name}")
+        results[uploaded_file.name] = extract_text_from_pdf_basic(
+            uploaded_file.getvalue(), uploaded_file.name
+        )
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODUŁ 2: IDENTYFIKACJA I MAPOWANIE DOKUMENTÓW
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Definicja wszystkich obsługiwanych typów dokumentów
+REQUIRED_DOC_TYPES = {
+    "BILANS": {
+        "label": "Bilans",
+        "icon": "🏦",
+        "desc": "Zestawienie aktywów i pasywów na dzień bilansowy",
+        "keywords": ["aktywa trwałe", "aktywa obrotowe", "pasywa", "kapitał własny", "zobowiązania"],
+    },
+    "RZiS": {
+        "label": "Rachunek Zysków i Strat",
+        "icon": "📈",
+        "desc": "Przychody, koszty i wynik finansowy za rok obrotowy",
+        "keywords": ["przychody ze sprzedaży", "koszty działalności", "zysk netto", "wynik finansowy", "amortyzacja"],
+    },
+    "ŚRODKI TRWAŁE": {
+        "label": "Tabela środków trwałych",
+        "icon": "🏗️",
+        "desc": "Wartość brutto, umorzenia i wartość netto środków trwałych",
+        "keywords": ["środki trwałe", "wartość brutto", "umorzenie", "odpisy amortyzacyjne"],
+    },
+    "PRZEPŁYWY PIENIĘŻNE": {
+        "label": "Rachunek przepływów pieniężnych",
+        "icon": "💸",
+        "desc": "Cash flow: operacyjny, inwestycyjny, finansowy",
+        "keywords": ["przepływy", "działalność operacyjna", "działalność inwestycyjna"],
+    },
+    "POLITYKA RACHUNKOWOŚCI": {
+        "label": "Polityka rachunkowości",
+        "icon": "📜",
+        "desc": "Przyjęte zasady rachunkowości, metody wyceny, okresy amortyzacji",
+        "keywords": ["polityka rachunkowości", "zasady rachunkowości", "metody wyceny",
+                     "okres amortyzacji", "przyjęte zasady", "opis przyjętych"],
+    },
+    "NOTY OBJAŚNIAJĄCE": {
+        "label": "Noty objaśniające",
+        "icon": "📝",
+        "desc": "Dodatkowe noty i objaśnienia do pozycji sprawozdania",
+        "keywords": ["nota ", "objaśnienie", "dodatkowe informacje"],
+    },
+}
+
+
+def identify_document_type(text: str) -> str:
+    """Heurystyczna identyfikacja typu dokumentu finansowego."""
+    text_lower = text.lower()
+    scores = {}
+    for doc_type, info in REQUIRED_DOC_TYPES.items():
+        scores[doc_type] = sum(text_lower.count(kw) for kw in info["keywords"])
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "INNY"
+
+
+def check_missing_documents(doc_mapping: dict) -> list[str]:
+    """Zwraca listę typów dokumentów których brakuje wśród wgranych plików."""
+    types_found = {d["type"] for d in doc_mapping.values()}
+    return [dt for dt in REQUIRED_DOC_TYPES if dt not in types_found]
+
+
+def map_documents(parsed_docs: dict) -> dict:
+    """Mapuje dokumenty do kategorii finansowych."""
+    mapping = {}
+    for filename, text in parsed_docs.items():
+        doc_type = identify_document_type(text)
+        mapping[filename] = {
+            "type": doc_type,
+            "text": text,
+            "length": len(text)
+        }
+    return mapping
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODUŁ 3: WALIDACJA SPÓJNOŚCI DANYCH
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def extract_financial_number(text: str, pattern: str) -> float | None:
+    """Wyciąga liczbę z tekstu na podstawie wzorca."""
+    try:
+        matches = re.findall(
+            rf"{pattern}[:\s]+([+-]?\d[\d\s.,]*)",
+            text, re.IGNORECASE
+        )
+        if matches:
+            num_str = matches[0].replace(" ", "").replace(",", ".")
+            return float(num_str)
+    except Exception:
+        pass
+    return None
+
+
+def validate_data_consistency(doc_mapping: dict) -> list:
+    """
+    Krok 3: Sprawdza spójność danych między dokumentami.
+    Zwraca listę komunikatów walidacji.
+    """
+    issues = []
+    all_text = "\n".join(d["text"] for d in doc_mapping.values())
+
+    # Sprawdź sumy bilansowe
+    aktywne = extract_financial_number(all_text, r"AKTYWA\s+RAZEM|suma\s+aktywów")
+    pasywa = extract_financial_number(all_text, r"PASYWA\s+RAZEM|suma\s+pasywów")
+
+    if aktywne and pasywa:
+        diff = abs(aktywne - pasywa)
+        if diff < 1:
+            issues.append({"level": "OK", "msg": f"✅ Bilans zbilansowany: A=P={aktywne:,.0f} PLN"})
+        elif diff < aktywne * 0.001:
+            issues.append({"level": "WARN", "msg": f"⚠️ Drobna różnica bilansowa: {diff:,.2f} PLN (prawdopodobnie zaokrąglenia)"})
+        else:
+            issues.append({"level": "ERR", "msg": f"❌ Bilans NIE jest zbilansowany! Różnica: {diff:,.0f} PLN"})
+    else:
+        issues.append({"level": "WARN", "msg": "⚠️ Nie znaleziono sum bilansowych do porównania"})
+
+    # Sprawdź zysk netto
+    zysk_rzis = extract_financial_number(all_text, r"zysk\s+(?:netto|na\s+koniec)")
+    zysk_bilans = extract_financial_number(all_text, r"wynik\s+finansowy\s+netto|zysk.*roku\s+obrotowego")
+    if zysk_rzis and zysk_bilans:
+        diff = abs(zysk_rzis - zysk_bilans)
+        if diff < zysk_rzis * 0.001:
+            issues.append({"level": "OK", "msg": f"✅ Zysk netto spójny: {zysk_rzis:,.0f} PLN"})
+        else:
+            issues.append({"level": "WARN", "msg": f"⚠️ Różnica zysku netto między RZiS a Bilansem: {diff:,.0f} PLN"})
+
+    # Typy dokumentów — sprawdź wszystkie zdefiniowane
+    types_found = [d["type"] for d in doc_mapping.values()]
+    for doc_type, info in REQUIRED_DOC_TYPES.items():
+        if doc_type in types_found:
+            issues.append({"level": "OK", "msg": f"✅ Znaleziono: {info['icon']} {info['label']}"})
+        else:
+            issues.append({"level": "WARN", "msg": f"⚠️ Brak dokumentu: {info['icon']} {info['label']}"}) 
+
+    return issues
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODUŁ 4: GENEROWANIE INFORMACJI DODATKOWEJ PRZEZ CLAUDE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SYSTEM_PROMPT = """Jesteś biegłym rewidentem i ekspertem ds. rachunkowości, specjalizującym się w polskim prawie bilansowym.
+Twoim zadaniem jest sporządzenie profesjonalnej "Informacji Dodatkowej" do sprawozdania finansowego.
+
+WYMAGANIA PRAWNE (Ustawa o Rachunkowości, Dz.U. z 2023 r. poz. 120):
+- Art. 48 UoR: Informacja dodatkowa obejmuje wprowadzenie i dodatkowe informacje i objaśnienia
+- Stosuj Krajowe Standardy Rachunkowości (KSR)
+- Używaj zasad wyceny zgodnych z UoR
+
+STRUKTURA DOKUMENTU (obowiązkowa):
+1. WPROWADZENIE DO SPRAWOZDANIA FINANSOWEGO
+   1.1 Dane identyfikacyjne jednostki
+   1.2 Zasady (polityka) rachunkowości — opisz DOKŁADNIE przyjęte zasady z dostarczonego dokumentu polityki
+   1.3 Metody wyceny aktywów i pasywów (środki trwałe, zapasy, należności, zobowiązania)
+   1.4 Metody amortyzacji i stosowane stawki/okresy ekonomicznej użyteczności
+   1.5 Zasady rozliczania przychodów i kosztów
+   1.6 Korekty błędów i zmiany polityki rachunkowości
+
+2. DODATKOWE INFORMACJE I OBJAŚNIENIA
+   2.1 Szczegółowy zakres zmian wartości grup rodzajowych środków trwałych
+       (wartość brutto, odpisy amortyzacyjne/umorzeniowe, wartość netto)
+   2.2 Wartości niematerialne i prawne
+   2.3 Należności długoterminowe
+   2.4 Inwestycje długoterminowe
+   2.5 Zapasy (surowce, WIP, wyroby gotowe)
+   2.6 Należności krótkoterminowe (z podziałem na tytuły)
+   2.7 Środki pieniężne i ich ekwiwalenty
+   2.8 Kapitały własne (zmiany w roku obrotowym)
+   2.9 Zobowiązania długo- i krótkoterminowe
+   2.10 Rozliczenia międzyokresowe
+   2.11 Przychody i koszty operacyjne (analiza)
+   2.12 Wynik finansowy i jego podział
+   2.13 Zobowiązania podatkowe (podatek odroczony)
+   2.14 Zatrudnienie (średnie w roku)
+   2.15 Wynagrodzenia organów spółki
+   2.16 Zdarzenia po dniu bilansowym
+   2.17 Inne istotne informacje
+
+STYL I JĘZYK:
+- Profesjonalne słownictwo: "wartość netto aktywów", "odpisy amortyzacyjne", "kapitał własny"
+- Liczby w PLN z dokładnością do groszy lub w tysiącach PLN (konsekwentnie)
+- Tryb oznajmujący, strona bierna, czas przeszły dla zdarzeń roku
+- Odesłania do konkretnych not i pozycji bilansu
+
+WAŻNE: Jeśli dane finansowe są dostępne w dokumentach – cytuj je dokładnie.
+Jeśli brakuje danych – zaznacz "[DANE DO UZUPEŁNIENIA]" i opisz co powinno się znaleźć.
+Jeśli dostarczono dokument Polityki Rachunkowości – sekcja 1.2–1.5 musi być oparta WYŁĄCZNIE na jego treści."""
+
+
+def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
+                               company_name: str, year: int,
+                               progress_callback=None) -> str:
+    """
+    Krok 4: Wywołuje Claude 3.5 Sonnet do generowania Informacji Dodatkowej.
+    """
+    client = anthropic.Anthropic(api_key=anthropic_api_key)
+
+    # Przygotuj kontekst z dokumentów
+    context_parts = [
+        f"NAZWA JEDNOSTKI: {company_name}",
+        f"ROK OBROTOWY: {year}",
+        "=" * 60,
+        "WYCIĄGI Z DOKUMENTÓW FINANSOWYCH:",
+    ]
+    for filename, doc_data in doc_mapping.items():
+        context_parts.append(f"\n[{doc_data['type']}] {filename}:")
+        # Ogranicz do 8000 znaków na dokument
+        context_parts.append(doc_data["text"][:8000])
+        if len(doc_data["text"]) > 8000:
+            context_parts.append("...[tekst skrócony]")
+
+    full_context = "\n".join(context_parts)
+
+    user_prompt = f"""Na podstawie poniższych dokumentów finansowych sporządź kompletną "Informację Dodatkową" do sprawozdania finansowego za rok {year}.
+
+{full_context}
+
+Wygeneruj pełną Informację Dodatkową zgodnie z polską Ustawą o Rachunkowości.
+Gdzie masz dane – użyj konkretnych liczb. Gdzie brakuje – napisz [DANE DO UZUPEŁNIENIA].
+Formatuj wyraźnie nagłówkami i akapitami."""
+
+    if progress_callback:
+        progress_callback(0.7, "Generowanie przez Claude 3.5 Sonnet...")
+
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=8000,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}]
+    )
+
+    return response.content[0].text
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODUŁ 5: EKSPORT DO WORD (.docx)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def add_horizontal_rule(doc: Document):
+    """Dodaje poziomą linię jako separator."""
+    p = doc.add_paragraph()
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "2d6a9f")
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+
+def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
+    """
+    Konwertuje wygenerowaną treść AI na sformatowany plik .docx.
+    """
+    doc = Document()
+
+    # Style
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(11)
+
+    # Marginesy
+    for section in doc.sections:
+        section.left_margin = Inches(1.2)
+        section.right_margin = Inches(1.2)
+        section.top_margin = Inches(1.0)
+        section.bottom_margin = Inches(1.0)
+
+    # Strona tytułowa
+    title = doc.add_heading("INFORMACJA DODATKOWA", 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in title.runs:
+        run.font.color.rgb = RGBColor(0x1e, 0x3a, 0x5f)
+        run.font.size = Pt(18)
+
+    subtitle = doc.add_paragraph(f"do sprawozdania finansowego za rok obrotowy {year}")
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in subtitle.runs:
+        run.font.size = Pt(13)
+        run.font.color.rgb = RGBColor(0x2d, 0x6a, 0x9f)
+
+    doc.add_paragraph(f"Jednostka: {company_name}").alignment = WD_ALIGN_PARAGRAPH.CENTER
+    add_horizontal_rule(doc)
+    doc.add_page_break()
+
+    # Parsowanie i formatowanie treści
+    lines = generated_text.split("\n")
+    for line in lines:
+        line = line.strip()
+        if not line:
+            doc.add_paragraph()
+            continue
+
+        # Nagłówki markdown
+        if line.startswith("#### "):
+            h = doc.add_heading(line[5:], level=4)
+        elif line.startswith("### "):
+            h = doc.add_heading(line[4:], level=3)
+        elif line.startswith("## "):
+            h = doc.add_heading(line[3:], level=2)
+            for run in h.runs:
+                run.font.color.rgb = RGBColor(0x1e, 0x3a, 0x5f)
+        elif line.startswith("# "):
+            h = doc.add_heading(line[2:], level=1)
+            for run in h.runs:
+                run.font.color.rgb = RGBColor(0x1e, 0x3a, 0x5f)
+        elif line.startswith("**") and line.endswith("**"):
+            p = doc.add_paragraph()
+            run = p.add_run(line.strip("*"))
+            run.bold = True
+        elif line.startswith("- ") or line.startswith("* "):
+            doc.add_paragraph(line[2:], style="List Bullet")
+        elif re.match(r"^\d+\.\s", line):
+            doc.add_paragraph(line, style="List Number")
+        else:
+            # Obsługa **bold** w środku tekstu
+            p = doc.add_paragraph()
+            parts = re.split(r"(\*\*[^*]+\*\*)", line)
+            for part in parts:
+                if part.startswith("**") and part.endswith("**"):
+                    run = p.add_run(part[2:-2])
+                    run.bold = True
+                else:
+                    p.add_run(part)
+
+    # Stopka
+    add_horizontal_rule(doc)
+    footer_p = doc.add_paragraph(
+        f"Dokument wygenerowany automatycznie | {company_name} | Rok {year}"
+    )
+    footer_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in footer_p.runs:
+        run.font.size = Pt(9)
+        run.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+
+    # Zapis do bufora
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GŁÓWNY INTERFEJS STREAMLIT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Sidebar: Konfiguracja ────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Konfiguracja")
+
+    anthropic_key = st.text_input(
+        "🔑 Klucz API Anthropic",
+        type="password",
+        placeholder="sk-ant-...",
+        help="Wymagany do generowania przez Claude 3.5 Sonnet"
+    )
+
+    llama_key = st.text_input(
+        "🦙 Klucz API LlamaParse (opcjonalny)",
+        type="password",
+        placeholder="llx-...",
+        help="Dla lepszej ekstrakcji tabel. Bez niego użyty zostanie pypdf."
+    )
+
+    st.divider()
+    st.subheader("🏢 Dane jednostki")
+    company_name = st.text_input("Nazwa spółki", placeholder="XYZ Sp. z o.o.")
+    fiscal_year = st.number_input("Rok obrotowy", min_value=2000, max_value=2030,
+                                   value=2024, step=1)
+
+    st.divider()
+    st.markdown("""
+    **📋 Obsługiwane dokumenty:**
+    - 🏦 Bilans
+    - 📈 Rachunek Zysków i Strat
+    - 🏗️ Tabela środków trwałych
+    - 💸 Przepływy pieniężne
+    - 📜 Polityka rachunkowości
+    - 📝 Noty objaśniające
+    """)
+
+
+# ── Główna sekcja ────────────────────────────────────────────────────────────
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.markdown('<div class="step-card"><b>📁 Krok 1:</b> Wgraj dokumenty PDF sprawozdania</div>',
+                unsafe_allow_html=True)
+    uploaded_files = st.file_uploader(
+        "Wybierz pliki PDF",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Wgraj 3-6 dokumentów: bilans, RZiS, noty, przepływy pieniężne"
+    )
+
+    if uploaded_files:
+        st.success(f"✅ Wgrano {len(uploaded_files)} plik(ów)")
+        for f in uploaded_files:
+            size_kb = len(f.getvalue()) // 1024
+            st.caption(f"📄 {f.name} ({size_kb} KB)")
+
+with col2:
+    st.markdown('<div class="step-card"><b>🔍 Krok 2:</b> Walidacja i mapowanie dokumentów</div>',
+                unsafe_allow_html=True)
+
+    if not anthropic_key:
+        st.info("👈 Wprowadź klucz API Anthropic w panelu bocznym, aby kontynuować.")
+    elif not uploaded_files:
+        st.info("👈 Wgraj pliki PDF, aby rozpocząć.")
+    elif not company_name:
+        st.warning("⚠️ Wprowadź nazwę spółki w panelu bocznym.")
+
+# ── Przycisk uruchomienia ────────────────────────────────────────────────────
+st.divider()
+
+run_disabled = not (anthropic_key and uploaded_files and company_name)
+if st.button("🚀 Generuj Informację Dodatkową", type="primary",
+              disabled=run_disabled, use_container_width=True):
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    results_container = st.container()
+
+    try:
+        # ── KROK 1: Parsowanie ──────────────────────────────────────────────
+        status_text.info("📄 Krok 1/4: Parsowanie dokumentów PDF...")
+        progress_bar.progress(10)
+
+        def update_progress(val, msg):
+            progress_bar.progress(int(10 + val * 20))
+            status_text.info(f"📄 {msg}")
+
+        if llama_key:
+            parsed = parse_documents_llamaparse(uploaded_files, llama_key, update_progress)
+        else:
+            parsed = parse_documents_fallback(uploaded_files, update_progress)
+
+        progress_bar.progress(30)
+        st.session_state["parsed_docs"] = parsed
+
+        # ── KROK 2: Mapowanie ───────────────────────────────────────────────
+        status_text.info("🗂️ Krok 2/4: Mapowanie i identyfikacja dokumentów...")
+        progress_bar.progress(40)
+        doc_mapping = map_documents(parsed)
+        st.session_state["doc_mapping"] = doc_mapping
+
+        # ── SPRAWDZENIE BRAKUJĄCYCH DOKUMENTÓW ─────────────────────────────
+        missing = check_missing_documents(doc_mapping)
+        if missing:
+            progress_bar.empty()
+            status_text.empty()
+
+            st.warning("⚠️ Nie znaleziono wszystkich dokumentów w wgranych plikach.")
+
+            st.markdown("**Brakujące dokumenty:**")
+            for dt in missing:
+                info = REQUIRED_DOC_TYPES[dt]
+                st.markdown(
+                    f"- {info['icon']} **{info['label']}** — {info['desc']}"
+                )
+
+            st.markdown("---")
+            st.markdown("**Co chcesz zrobić?**")
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("▶️ Kontynuuj bez brakujących dokumentów",
+                              use_container_width=True, type="primary"):
+                    st.session_state["missing_decision"] = "continue"
+                    st.rerun()
+            with col_b:
+                if st.button("📁 Anuluj — chcę dodać brakujące pliki",
+                              use_container_width=True):
+                    st.session_state["missing_decision"] = "cancel"
+                    st.rerun()
+
+            st.info(
+                "💡 Wskazówka: Jeśli plik zawiera kilka dokumentów w jednym PDF "
+                "(np. Bilans + RZiS razem), aplikacja może nie rozpoznać drugiego. "
+                "Spróbuj wgrać je jako osobne pliki."
+            )
+            st.stop()
+
+        # Jeśli użytkownik wrócił po decyzji
+        decision = st.session_state.pop("missing_decision", None)
+        if decision == "cancel":
+            st.info("Wgraj brakujące pliki i uruchom ponownie.")
+            st.stop()
+
+        # (decision == "continue" lub brak braków — kontynuuj normalnie)
+
+        # ── KROK 3: Walidacja ───────────────────────────────────────────────
+        status_text.info("✅ Krok 3/4: Walidacja spójności danych...")
+        progress_bar.progress(55)
+        validation_issues = validate_data_consistency(doc_mapping)
+
+        with results_container:
+            st.subheader("📋 Raport mapowania i walidacji")
+            map_cols = st.columns(len(doc_mapping))
+            for i, (fname, ddata) in enumerate(doc_mapping.items()):
+                with map_cols[i]:
+                    st.markdown(f"""
+                    <div class="metric-box">
+                        <b>{ddata['type']}</b><br>
+                        <small>{fname}</small><br>
+                        <small>{ddata['length']:,} znaków</small>
+                    </div>""", unsafe_allow_html=True)
+
+            st.subheader("🔎 Walidacja danych")
+            for issue in validation_issues:
+                css = {"OK": "validation-ok", "WARN": "validation-warn", "ERR": "validation-err"}
+                st.markdown(f'<span class="{css.get(issue["level"], "")}">{issue["msg"]}</span>',
+                            unsafe_allow_html=True)
+
+        # ── KROK 4: Generowanie ─────────────────────────────────────────────
+        status_text.info("🤖 Krok 4/4: Generowanie przez Claude 3.5 Sonnet (może potrwać 1-2 min)...")
+        progress_bar.progress(65)
+
+        generated_text = generate_accounting_notes(
+            doc_mapping=doc_mapping,
+            anthropic_api_key=anthropic_key,
+            company_name=company_name,
+            year=fiscal_year,
+            progress_callback=lambda v, m: progress_bar.progress(int(65 + v * 20))
+        )
+        st.session_state["generated_text"] = generated_text
+        progress_bar.progress(88)
+
+        # ── KROK 5: Eksport do Word ─────────────────────────────────────────
+        status_text.info("💾 Generowanie pliku Word...")
+        docx_bytes = save_to_word(generated_text, company_name, fiscal_year)
+        st.session_state["docx_bytes"] = docx_bytes
+        progress_bar.progress(100)
+        status_text.success("✅ Informacja Dodatkowa wygenerowana pomyślnie!")
+
+        # ── Podgląd i pobieranie ────────────────────────────────────────────
+        with results_container:
+            st.divider()
+            dl_col, _ = st.columns([1, 2])
+            with dl_col:
+                st.download_button(
+                    label="⬇️ Pobierz Informację Dodatkową (.docx)",
+                    data=docx_bytes,
+                    file_name=f"informacja_dodatkowa_{company_name.replace(' ', '_')}_{fiscal_year}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    type="primary",
+                    use_container_width=True
+                )
+
+            with st.expander("👁️ Podgląd wygenerowanej treści", expanded=True):
+                st.markdown(generated_text)
+
+    except anthropic.AuthenticationError:
+        st.error("❌ Nieprawidłowy klucz API Anthropic. Sprawdź wartość w panelu bocznym.")
+    except anthropic.RateLimitError:
+        st.error("❌ Przekroczono limit zapytań API. Poczekaj chwilę i spróbuj ponownie.")
+    except Exception as e:
+        st.error(f"❌ Błąd: {e}")
+        st.exception(e)
+
+# ── Jeśli wyniki już są w sesji ──────────────────────────────────────────────
+elif "generated_text" in st.session_state:
+    st.info("📝 Wyniki z poprzedniego uruchomienia (wgraj nowe pliki lub wciśnij Generuj ponownie).")
+    if st.session_state.get("docx_bytes"):
+        st.download_button(
+            label="⬇️ Pobierz poprzedni wynik (.docx)",
+            data=st.session_state["docx_bytes"],
+            file_name=f"informacja_dodatkowa_{fiscal_year}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    with st.expander("👁️ Poprzednio wygenerowana treść"):
+        st.markdown(st.session_state["generated_text"])
