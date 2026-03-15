@@ -487,6 +487,31 @@ def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
 # ── Odczyt kluczy z Streamlit Secrets (jeśli ustawione) ─────────────────────
 _anthropic_from_secrets = st.secrets.get("ANTHROPIC_API_KEY", "")
 _llama_from_secrets = st.secrets.get("LLAMA_API_KEY", "")
+_app_password = st.secrets.get("APP_PASSWORD", "")
+
+# ── Ochrona hasłem ───────────────────────────────────────────────────────────────────────────
+if _app_password:
+    if not st.session_state.get("authenticated"):
+        st.markdown("""
+        <div style="max-width:400px; margin: 4rem auto; padding: 2rem;
+                    border:1px solid #dee2e6; border-radius:12px;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align:center;">
+            <h2>🔐 Dostęp chroniony</h2>
+            <p style="color:#666;">Wprowadź hasło aby kontynuować</p>
+        </div>
+        """, unsafe_allow_html=True)
+        col_c, col_mid, col_d = st.columns([1, 2, 1])
+        with col_mid:
+            entered = st.text_input("Hasło", type="password",
+                                    label_visibility="collapsed",
+                                    placeholder="Wpisz hasło dostępu...")
+            if st.button("Zaloguj →", use_container_width=True, type="primary"):
+                if entered == _app_password:
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("❌ Nieprawiłowe hasło")
+        st.stop()
 
 # ── Sidebar: Konfiguracja ────────────────────────────────────────────────────
 with st.sidebar:
