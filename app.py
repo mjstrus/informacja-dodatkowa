@@ -142,129 +142,146 @@ def parse_documents_fallback(pdf_files: list, progress_callback=None) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODUŁ KRS: POBIERANIE DANYCH Z OFICJALNEGO API MINISTERSTWA SPRAWIEDLIWOŚCI
 # ═══════════════════════════════════════════════════════════════════════════════
-
-KRS_API_BASE = "https://api-krs.ms.gov.pl/api/krs/OdpisAktualny"
-KRS_SEARCH_BASE = "https://api-krs.ms.gov.pl/api/krs/podmiot"
+#
+# Oficjalne API KRS (prs.ms.gov.pl/krs/openApi):
+#   Krok 1: Wyszukaj podmiot po NIP → uzyskaj numer KRS
+#   Krok 2: Pobierz odpis aktualny po numerze KRS
+# Bezpłatne, bez klucza API, publicznie dostępne.
 
 def fetch_krs_by_nip(nip: str) -> dict | None:
     """
     Pobiera dane spółki z oficjalnego API KRS Ministerstwa Sprawiedliwości.
-    Endpoint: api-krs.ms.gov.pl — bezpłatny, bez klucza API.
+    Dwuetapowo: NIP → numer KRS → odpis aktualny.
     """
     nip_clean = re.sub(r"[^0-9]", "", nip)
     if len(nip_clean) != 10:
         return None
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; InformacjaDodatkowa/1.0)"
+    }
+
     try:
-        # Krok 1: znajdź numer KRS po NIP
-        search_url = f"https://api-krs.ms.gov.pl/api/krs/podmiot/wyszukaj"
+        # ── Krok 1: znajdź numer KRS po NIP ──────────────────────────────
+        search_url = "https://api-krs.ms.gov.pl/api/krs/podmiot/wyszukaj"
         params = {"nip": nip_clean, "strona": 1, "rekordyNaStronie": 1}
-        headers = {"Accept": "application/json"}
-        r = requests.get(search_url, params=params, headers=headers, timeout=10)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        podmioty = data.get("odpis", {}).get("dane", {}).get("dzialy", {})
-        # Spróbuj alternatywnej struktury
-        lista = data.get("podmiotList", data.get("response", {}).get("podmiotList", []))
-        if not lista:
-            # Spróbuj bezpośrednio po NIP w odpisie
-            return _fetch_odpis_by_nip_direct(nip_clean)
-        krs_nr = lista[0].get("numerKRS") or lista[0].get("nrKrs", "")
+        r = requests.get(search_url, params=params, headers=headers, timeout=15)
+
+        krs_nr = None
+
+        if r.status_code == 200:
+            data = r.json()
+            # Struktura: {"odpis": {"dane": {"dzialy": ...}}} lub lista podmiotów
+            podmioty = (data.get("podmiotList") or
+                        data.get("response", {}).get("podmiotList") or
+                        data.get("lista") or [])
+            if podmioty and isinstance(podmioty, list):
+                krs_nr = (podmioty[0].get("numerKRS") or
+                          podmioty[0].get("nrKrs") or
+                          podmioty[0].get("krs"))
+
+        # Jeśli wyszukiwarka nie dała KRS, spróbuj przez podmiot/nip
+        if not krs_nr:
+            r2 = requests.get(
+                f"https://api-krs.ms.gov.pl/api/krs/podmiot/nip/{nip_clean}",
+                headers=headers, timeout=15
+            )
+            if r2.status_code == 200:
+                d2 = r2.json()
+                krs_nr = (d2.get("numerKRS") or d2.get("nrKrs") or
+                          d2.get("odpis", {}).get("numerKRS"))
+
         if not krs_nr:
             return None
-        return _fetch_odpis_by_krs(krs_nr.zfill(10))
+
+        krs_nr_padded = str(krs_nr).zfill(10)
+
+        # ── Krok 2: pobierz odpis aktualny po numerze KRS ─────────────────
+        odpis_url = f"https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/{krs_nr_padded}"
+        r3 = requests.get(odpis_url, params={"rejestr": "P", "format": "json"},
+                          headers=headers, timeout=20)
+
+        if r3.status_code != 200:
+            # Spróbuj bez parametrów
+            r3 = requests.get(odpis_url, headers=headers, timeout=20)
+
+        if r3.status_code == 200:
+            return _parse_odpis(r3.json(), krs_nr_padded, nip_clean)
+
+    except requests.exceptions.ConnectionError:
+        raise ConnectionError("Brak połączenia z API KRS")
+    except requests.exceptions.Timeout:
+        raise TimeoutError("API KRS nie odpowiada (timeout)")
     except Exception as e:
-        return _fetch_odpis_by_nip_direct(nip_clean)
+        raise RuntimeError(f"Błąd API KRS: {e}")
 
-
-def _fetch_odpis_by_nip_direct(nip: str) -> dict | None:
-    """Próbuje pobrać odpis bezpośrednio przez endpoint podmiot z NIP."""
-    try:
-        url = f"https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/nip/{nip}"
-        r = requests.get(url, headers={"Accept": "application/json"}, timeout=10)
-        if r.status_code == 200:
-            return _parse_odpis(r.json())
-        # Fallback: wyszukiwarka podmiotów
-        url2 = f"https://api-krs.ms.gov.pl/api/krs/podmiot/nip/{nip}"
-        r2 = requests.get(url2, headers={"Accept": "application/json"}, timeout=10)
-        if r2.status_code == 200:
-            data = r2.json()
-            krs_nr = (data.get("numerKRS") or
-                      data.get("nrKrs") or
-                      data.get("odpis", {}).get("numerKRS", ""))
-            if krs_nr:
-                return _fetch_odpis_by_krs(str(krs_nr).zfill(10))
-    except Exception:
-        pass
     return None
 
 
-def _fetch_odpis_by_krs(krs_nr: str) -> dict | None:
-    """Pobiera odpis aktualny po numerze KRS."""
+def _parse_odpis(data: dict, krs_nr: str = "", nip_clean: str = "") -> dict | None:
+    """Wyciąga potrzebne pola z odpisu JSON zwróconego przez API KRS."""
     try:
-        url = f"https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/{krs_nr}"
-        params = {"rejestr": "P", "format": "json"}
-        r = requests.get(url, params=params,
-                         headers={"Accept": "application/json"}, timeout=15)
-        if r.status_code == 200:
-            return _parse_odpis(r.json())
-    except Exception:
-        pass
-    return None
-
-
-def _parse_odpis(data: dict) -> dict | None:
-    """Wyciąga potrzebne pola z odpowiedzi API KRS."""
-    try:
+        # Nawigacja po strukturze odpisu
         odpis = data.get("odpis", data)
+        naglowek = odpis.get("naglowekA", odpis.get("naglowek", {}))
         dane = odpis.get("dane", odpis)
         dzial1 = dane.get("dzial1", {})
-        dzial1_dane = dzial1.get("danePodmiotu", dzial1)
+        dane_p = dzial1.get("danePodmiotu", dzial1)
 
-        # Nazwa
-        nazwa = (dzial1_dane.get("nazwa") or
-                 dzial1_dane.get("nazwaPelna") or
+        # ── Nazwa ────────────────────────────────────────────────────────
+        nazwa = (dane_p.get("nazwa") or
+                 dane_p.get("nazwaPelna") or
+                 naglowek.get("nazwaOrganu") or
                  dane.get("nazwa") or "")
 
-        # Siedziba
-        siedziba_raw = (dzial1_dane.get("siedzibaIAdres") or
-                        dzial1_dane.get("siedziba") or
-                        dane.get("siedzibaIAdres") or {})
-        if isinstance(siedziba_raw, dict):
-            miasto = siedziba_raw.get("miasto") or siedziba_raw.get("miejscowosc") or ""
-            ulica = siedziba_raw.get("ulica") or ""
-            nr_domu = siedziba_raw.get("nrDomu") or siedziba_raw.get("numerDomu") or ""
-            kod = siedziba_raw.get("kodPocztowy") or ""
-            siedziba = f"{ulica} {nr_domu}, {kod} {miasto}".strip(", ")
+        # ── Siedziba ─────────────────────────────────────────────────────
+        siedz = (dane_p.get("siedzibaIAdres") or
+                 dane_p.get("siedziba") or
+                 dzial1.get("siedzibaIAdres") or {})
+        if isinstance(siedz, dict):
+            ulica = siedz.get("ulica") or siedz.get("adres", {}).get("ulica", "")
+            nr = siedz.get("nrDomu") or siedz.get("numerDomu") or ""
+            lok = siedz.get("nrLokalu") or ""
+            kod = siedz.get("kodPocztowy") or ""
+            miasto = siedz.get("miasto") or siedz.get("miejscowosc") or ""
+            siedziba = f"ul. {ulica} {nr}" + (f"/{lok}" if lok else "")
+            siedziba = siedziba.strip() + f", {kod} {miasto}".strip()
+            siedziba = siedziba.strip(", ")
         else:
-            siedziba = str(siedziba_raw)
+            siedziba = str(siedz)
 
-        # NIP, KRS, REGON
-        nip_val = (dzial1_dane.get("nip") or dane.get("nip") or
-                   odpis.get("naglowekA", {}).get("nip") or "")
-        krs_val = (odpis.get("naglowekA", {}).get("numerKRS") or
-                   dane.get("numerKRS") or dzial1_dane.get("numerKRS") or "")
-        regon_val = (dzial1_dane.get("regon") or dane.get("regon") or "")
+        # ── Identyfikatory ───────────────────────────────────────────────
+        nip_val = (dane_p.get("nip") or naglowek.get("nip") or
+                   dane.get("nip") or nip_clean)
+        regon_val = dane_p.get("regon") or dane.get("regon") or ""
+        krs_val = (naglowek.get("numerKRS") or dane.get("numerKRS") or
+                   dane_p.get("numerKRS") or krs_nr)
 
-        # PKD — główny przedmiot działalności
-        pkd_lista = (dzial1.get("przedmiotDzialalnosci", {})
-                     .get("przedmiotPrzewazajacejDzialalnosci", []))
+        # ── Forma prawna ─────────────────────────────────────────────────
+        forma = (dane_p.get("formaPrawna") or dane.get("formaPrawna") or
+                 naglowek.get("formaPrawna") or "")
+
+        # ── PKD ──────────────────────────────────────────────────────────
+        pkd = ""
+        pkd_section = dzial1.get("przedmiotDzialalnosci", {})
+        pkd_lista = (pkd_section.get("przedmiotPrzewazajacejDzialalnosci") or
+                     pkd_section.get("przedmiotDzialalnosci") or [])
         if isinstance(pkd_lista, list) and pkd_lista:
-            pkd_item = pkd_lista[0]
-            pkd_kod = pkd_item.get("kodDzialalnosci", "")
-            pkd_opis = pkd_item.get("opis", "")
-            pkd = f"{pkd_kod} {pkd_opis}".strip()
-        else:
-            pkd = ""
+            p = pkd_lista[0]
+            kod = p.get("kodDzialalnosci") or p.get("kod") or ""
+            opis = p.get("opis") or p.get("nazwa") or ""
+            pkd = f"{kod} {opis}".strip()
+        elif isinstance(pkd_lista, dict):
+            kod = pkd_lista.get("kodDzialalnosci") or ""
+            opis = pkd_lista.get("opis") or ""
+            pkd = f"{kod} {opis}".strip()
 
-        # Data rejestracji / czas trwania działalności
-        data_rej = (odpis.get("naglowekA", {}).get("dataRejestracjiWKRS") or
-                    dzial1_dane.get("dataRejestracji") or
-                    dane.get("dataWpisuDoRejestru") or "")
-
-        # Forma prawna
-        forma = (dzial1_dane.get("formaPrawna") or
-                 dane.get("formaPrawna") or "")
+        # ── Data rejestracji ─────────────────────────────────────────────
+        data_rej = (naglowek.get("dataRejestracjiWKRS") or
+                    dane_p.get("dataRejestracji") or
+                    dane.get("dataWpisuDoRejestru") or
+                    naglowek.get("dataRejestracjiPodmiotu") or "")
 
         return {
             "nazwa": nazwa,
@@ -276,7 +293,7 @@ def _parse_odpis(data: dict) -> dict | None:
             "data_rejestracji": data_rej,
             "forma_prawna": forma,
         }
-    except Exception:
+    except Exception as e:
         return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -719,13 +736,25 @@ with st.sidebar:
                                help="Wpisz NIP i kliknij Pobierz z KRS")
     if st.button("⬇️ Pobierz dane z KRS", use_container_width=True):
         if nip_input:
-            with st.spinner("Pobieranie z API KRS..."):
-                krs_data = fetch_krs_by_nip(nip_input)
-            if krs_data:
-                st.session_state["krs_data"] = krs_data
-                st.success("✅ Dane pobrane z KRS!")
-            else:
-                st.error("❌ Nie znaleziono podmiotu. Sprawdź NIP lub uzupełnij ręcznie.")
+            with st.spinner("Pobieranie z API KRS Ministerstwa Sprawiedliwości..."):
+                try:
+                    krs_data = fetch_krs_by_nip(nip_input)
+                    if krs_data:
+                        st.session_state["krs_data"] = krs_data
+                        st.success("✅ Dane pobrane z KRS!")
+                    else:
+                        st.error(
+                            "❌ Nie znaleziono podmiotu w KRS dla podanego NIP. "
+                            "Upewnij się że NIP jest poprawny i spółka jest wpisana do KRS "
+                            "(jednoosobowe działalności gospodarcze nie są w KRS). "
+                            "Możesz uzupełnić dane ręcznie poniżej."
+                        )
+                except ConnectionError:
+                    st.error("❌ Brak połączenia z API KRS. Sprawdź połączenie internetowe.")
+                except TimeoutError:
+                    st.error("❌ API KRS nie odpowiada. Spróbuj za chwilę.")
+                except Exception as e:
+                    st.error(f"❌ Błąd pobierania z KRS: {e}. Uzupełnij dane ręcznie.")
         else:
             st.warning("Wpisz NIP aby pobrać dane.")
 
