@@ -2,7 +2,7 @@
 Automatyzator Informacji Dodatkowej do sprawozdania finansowego
 Streamlit app z Claude 3.5 Sonnet + LlamaParse + python-docx
 """
- 
+
 import streamlit as st
 import anthropic
 import os
@@ -19,7 +19,7 @@ from docx.oxml import OxmlElement
 import base64
 import requests
 from datetime import date
- 
+
 # ─── PAGE CONFIG ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Generator Informacji Dodatkowej",
@@ -27,7 +27,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
- 
+
 # ─── STYLES ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -60,7 +60,7 @@ st.markdown("""
     .stProgress > div > div { background-color: #2d6a9f; }
 </style>
 """, unsafe_allow_html=True)
- 
+
 # ─── HEADER ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="main-header">
@@ -68,11 +68,11 @@ st.markdown("""
     <p>Automatyczne tworzenie not do sprawozdania finansowego zgodnie z Ustawą o Rachunkowości</p>
 </div>
 """, unsafe_allow_html=True)
- 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODUŁ 1: PARSOWANIE PDF
 # ═══════════════════════════════════════════════════════════════════════════════
- 
+
 def extract_text_from_pdf_basic(pdf_bytes: bytes, filename: str) -> str:
     """Ekstrakcja tekstu z PDF przy użyciu pypdf (fallback bez LlamaParse)."""
     try:
@@ -86,8 +86,8 @@ def extract_text_from_pdf_basic(pdf_bytes: bytes, filename: str) -> str:
         return "\n".join(text_parts)
     except Exception as e:
         return f"[BŁĄD ekstrakcji {filename}: {e}]"
- 
- 
+
+
 def parse_documents_llamaparse(pdf_files: list, llama_api_key: str, progress_callback=None) -> dict:
     """
     Krok 1 & 2: Parsowanie PDF przez LlamaParse + identyfikacja dokumentów.
@@ -124,8 +124,8 @@ def parse_documents_llamaparse(pdf_files: list, llama_api_key: str, progress_cal
     except Exception as e:
         st.warning(f"⚠️ Błąd LlamaParse ({e}) – używam pypdf jako fallback.")
         return parse_documents_fallback(pdf_files, progress_callback)
- 
- 
+
+
 def parse_documents_fallback(pdf_files: list, progress_callback=None) -> dict:
     """Fallback: ekstrakcja przez pypdf."""
     results = {}
@@ -136,9 +136,9 @@ def parse_documents_fallback(pdf_files: list, progress_callback=None) -> dict:
             uploaded_file.getvalue(), uploaded_file.name
         )
     return results
- 
- 
- 
+
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODUŁ KRS: POBIERANIE DANYCH Z OFICJALNEGO API MINISTERSTWA SPRAWIEDLIWOŚCI
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -146,7 +146,7 @@ def parse_documents_fallback(pdf_files: list, progress_callback=None) -> dict:
 # Oficjalne API KRS (api-krs.ms.gov.pl) działa TYLKO po numerze KRS.
 # Endpoint: GET /api/krs/OdpisAktualny/{nrKRS}?rejestr=P&format=json
 # Bezpłatne, bez klucza API.
- 
+
 def fetch_krs_by_krs_nr(krs_nr: str) -> dict | None:
     """
     Pobiera dane spółki z oficjalnego API KRS po numerze KRS (10 cyfr).
@@ -154,7 +154,7 @@ def fetch_krs_by_krs_nr(krs_nr: str) -> dict | None:
     krs_clean = re.sub(r"[^0-9]", "", krs_nr).zfill(10)
     if len(krs_clean) != 10:
         return None
- 
+
     headers = {
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0 (compatible; InformacjaDodatkowa/1.0)"
@@ -177,8 +177,8 @@ def fetch_krs_by_krs_nr(krs_nr: str) -> dict | None:
     except Exception as e:
         raise RuntimeError(f"Błąd API KRS: {e}")
     return None
- 
- 
+
+
 def fetch_krs_by_krs_nr_debug(krs_nr: str) -> tuple:
     """Wersja diagnostyczna — zwraca (dane, log)."""
     import json as _json
@@ -209,67 +209,81 @@ def fetch_krs_by_krs_nr_debug(krs_nr: str) -> tuple:
             log.append(f"  Wyjątek: {e}")
     log.append("\n❌ Nie udało się pobrać danych.")
     return None, "\n".join(log)
- 
- 
+
+
 def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
-    """Wyciąga potrzebne pola z odpisu JSON zwróconego przez API KRS."""
+    """Wyciąga potrzebne pola z odpisu JSON zwróconego przez API KRS.
+    Struktura rzeczywista: odpis.dane.dzial1.danePodmiotu / siedzibaIAdres / przedmiotDzialalnosci
+    """
     try:
         odpis = data.get("odpis", data)
-        naglowek = odpis.get("naglowekA", odpis.get("naglowek", {}))
-        dane = odpis.get("dane", odpis)
+        naglowek = odpis.get("naglowekA", {})
+        dane = odpis.get("dane", {})
         dzial1 = dane.get("dzial1", {})
-        dane_p = dzial1.get("danePodmiotu", dzial1)
- 
-        nazwa = (dane_p.get("nazwa") or dane_p.get("nazwaPelna") or
-                 naglowek.get("nazwaOrganu") or dane.get("nazwa") or "")
- 
-        siedz = (dane_p.get("siedzibaIAdres") or dane_p.get("siedziba") or
-                 dzial1.get("siedzibaIAdres") or {})
-        if isinstance(siedz, dict):
-            ulica = siedz.get("ulica") or ""
-            nr = siedz.get("nrDomu") or siedz.get("numerDomu") or ""
-            lok = siedz.get("nrLokalu") or ""
-            kod = siedz.get("kodPocztowy") or ""
-            miasto = siedz.get("miasto") or siedz.get("miejscowosc") or ""
-            siedziba = (f"ul. {ulica} {nr}" + (f"/{lok}" if lok else "")).strip()
-            if kod or miasto:
-                siedziba += f", {kod} {miasto}".rstrip()
-        else:
-            siedziba = str(siedz)
- 
-        nip_val = (dane_p.get("nip") or naglowek.get("nip") or dane.get("nip") or "")
-        regon_val = dane_p.get("regon") or dane.get("regon") or ""
-        krs_val = (naglowek.get("numerKRS") or dane.get("numerKRS") or
-                   dane_p.get("numerKRS") or krs_nr)
-        forma = (dane_p.get("formaPrawna") or dane.get("formaPrawna") or
-                 naglowek.get("formaPrawna") or "")
- 
+        dane_p = dzial1.get("danePodmiotu", {})
+
+        # ── Nazwa ─────────────────────────────────────────────────────────
+        nazwa = dane_p.get("nazwa", "")
+
+        # ── Identyfikatory: NIP i REGON są w osobnym polu ─────────────────
+        ident = dane_p.get("identyfikatory", {})
+        nip_val = ident.get("nip", "")
+        regon_raw = ident.get("regon", "")
+        # REGON może być 14-cyfrowy (z zerami) — przytnij do 9
+        regon_val = regon_raw[:9] if regon_raw else ""
+
+        # ── Forma prawna ──────────────────────────────────────────────────
+        forma = dane_p.get("formaPrawna", "")
+
+        # ── Siedziba i adres są w dzial1.siedzibaIAdres ───────────────────
+        siedz_blok = dzial1.get("siedzibaIAdres", {})
+        adres = siedz_blok.get("adres", {})
+        ulica = adres.get("ulica", "").replace("UL. ", "ul. ").replace("UL.", "ul.")
+        nr_domu = adres.get("nrDomu", "")
+        nr_lok = adres.get("nrLokalu", "")
+        kod = adres.get("kodPocztowy", "")
+        miasto = adres.get("miejscowosc", "")
+        siedziba = f"{ulica} {nr_domu}".strip()
+        if nr_lok:
+            siedziba += f"/{nr_lok}"
+        if kod and miasto:
+            siedziba += f", {kod} {miasto}"
+
+        # ── Numer KRS z nagłówka ──────────────────────────────────────────
+        krs_val = naglowek.get("numerKRS", krs_nr)
+
+        # ── Data rejestracji ──────────────────────────────────────────────
+        data_rej = naglowek.get("dataRejestracjiWKRS", "")
+
+        # ── PKD — w dzial1.przedmiotDzialalnosci ─────────────────────────
         pkd = ""
         pkd_section = dzial1.get("przedmiotDzialalnosci", {})
-        pkd_lista = (pkd_section.get("przedmiotPrzewazajacejDzialalnosci") or
-                     pkd_section.get("przedmiotDzialalnosci") or [])
-        if isinstance(pkd_lista, list) and pkd_lista:
-            p0 = pkd_lista[0]
-            pkd = f"{p0.get('kodDzialalnosci','') or p0.get('kod','')} {p0.get('opis','') or p0.get('nazwa','')}".strip()
-        elif isinstance(pkd_lista, dict):
-            pkd = f"{pkd_lista.get('kodDzialalnosci','')} {pkd_lista.get('opis','')}".strip()
- 
-        data_rej = (naglowek.get("dataRejestracjiWKRS") or
-                    dane_p.get("dataRejestracji") or
-                    dane.get("dataWpisuDoRejestru") or "")
- 
+        pkd_glowna = pkd_section.get("przedmiotPrzewazajacejDzialalnosci", [])
+        if isinstance(pkd_glowna, list) and pkd_glowna:
+            p0 = pkd_glowna[0]
+            kod_pkd = p0.get("kodDzialalnosci", "")
+            opis_pkd = p0.get("opis", "")
+            pkd = f"{kod_pkd} {opis_pkd}".strip()
+        elif isinstance(pkd_glowna, dict):
+            pkd = f"{pkd_glowna.get('kodDzialalnosci','')} {pkd_glowna.get('opis','')}".strip()
+
         return {
-            "nazwa": nazwa, "siedziba": siedziba, "nip": nip_val,
-            "krs": krs_val, "regon": regon_val, "pkd": pkd,
-            "data_rejestracji": data_rej, "forma_prawna": forma,
+            "nazwa": nazwa,
+            "siedziba": siedziba,
+            "nip": nip_val,
+            "krs": krs_val,
+            "regon": regon_val,
+            "pkd": pkd,
+            "data_rejestracji": data_rej,
+            "forma_prawna": forma,
         }
-    except Exception:
+    except Exception as e:
         return None
- 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODUŁ 2: IDENTYFIKACJA I MAPOWANIE DOKUMENTÓW
 # ═══════════════════════════════════════════════════════════════════════════════
- 
+
 # Definicja wszystkich obsługiwanych typów dokumentów
 REQUIRED_DOC_TYPES = {
     "BILANS": {
@@ -318,8 +332,8 @@ REQUIRED_DOC_TYPES = {
                      "księga główna", "salda debetowe", "salda kredytowe"],
     },
 }
- 
- 
+
+
 def identify_document_type(text: str) -> str:
     """Heurystyczna identyfikacja typu dokumentu finansowego."""
     text_lower = text.lower()
@@ -328,14 +342,14 @@ def identify_document_type(text: str) -> str:
         scores[doc_type] = sum(text_lower.count(kw) for kw in info["keywords"])
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else "INNY"
- 
- 
+
+
 def check_missing_documents(doc_mapping: dict) -> list[str]:
     """Zwraca listę typów dokumentów których brakuje wśród wgranych plików."""
     types_found = {d["type"] for d in doc_mapping.values()}
     return [dt for dt in REQUIRED_DOC_TYPES if dt not in types_found]
- 
- 
+
+
 def map_documents(parsed_docs: dict) -> dict:
     """Mapuje dokumenty do kategorii finansowych."""
     mapping = {}
@@ -347,12 +361,12 @@ def map_documents(parsed_docs: dict) -> dict:
             "length": len(text)
         }
     return mapping
- 
- 
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODUŁ 3: WALIDACJA SPÓJNOŚCI DANYCH
 # ═══════════════════════════════════════════════════════════════════════════════
- 
+
 def extract_financial_number(text: str, pattern: str) -> float | None:
     """Wyciąga liczbę z tekstu na podstawie wzorca."""
     try:
@@ -366,8 +380,8 @@ def extract_financial_number(text: str, pattern: str) -> float | None:
     except Exception:
         pass
     return None
- 
- 
+
+
 def validate_data_consistency(doc_mapping: dict) -> list:
     """
     Krok 3: Sprawdza spójność danych między dokumentami.
@@ -375,11 +389,11 @@ def validate_data_consistency(doc_mapping: dict) -> list:
     """
     issues = []
     all_text = "\n".join(d["text"] for d in doc_mapping.values())
- 
+
     # Sprawdź sumy bilansowe
     aktywne = extract_financial_number(all_text, r"AKTYWA\s+RAZEM|suma\s+aktywów")
     pasywa = extract_financial_number(all_text, r"PASYWA\s+RAZEM|suma\s+pasywów")
- 
+
     if aktywne and pasywa:
         diff = abs(aktywne - pasywa)
         if diff < 1:
@@ -390,7 +404,7 @@ def validate_data_consistency(doc_mapping: dict) -> list:
             issues.append({"level": "ERR", "msg": f"❌ Bilans NIE jest zbilansowany! Różnica: {diff:,.0f} PLN"})
     else:
         issues.append({"level": "WARN", "msg": "⚠️ Nie znaleziono sum bilansowych do porównania"})
- 
+
     # Sprawdź zysk netto
     zysk_rzis = extract_financial_number(all_text, r"zysk\s+(?:netto|na\s+koniec)")
     zysk_bilans = extract_financial_number(all_text, r"wynik\s+finansowy\s+netto|zysk.*roku\s+obrotowego")
@@ -400,7 +414,7 @@ def validate_data_consistency(doc_mapping: dict) -> list:
             issues.append({"level": "OK", "msg": f"✅ Zysk netto spójny: {zysk_rzis:,.0f} PLN"})
         else:
             issues.append({"level": "WARN", "msg": f"⚠️ Różnica zysku netto między RZiS a Bilansem: {diff:,.0f} PLN"})
- 
+
     # Typy dokumentów — sprawdź wszystkie zdefiniowane
     types_found = [d["type"] for d in doc_mapping.values()]
     for doc_type, info in REQUIRED_DOC_TYPES.items():
@@ -408,22 +422,22 @@ def validate_data_consistency(doc_mapping: dict) -> list:
             issues.append({"level": "OK", "msg": f"✅ Znaleziono: {info['icon']} {info['label']}"})
         else:
             issues.append({"level": "WARN", "msg": f"⚠️ Brak dokumentu: {info['icon']} {info['label']}"}) 
- 
+
     return issues
- 
- 
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODUŁ 4: GENEROWANIE INFORMACJI DODATKOWEJ PRZEZ CLAUDE
 # ═══════════════════════════════════════════════════════════════════════════════
- 
+
 SYSTEM_PROMPT = """Jesteś biegłym rewidentem i ekspertem ds. rachunkowości, specjalizującym się w polskim prawie bilansowym.
 Twoim zadaniem jest sporządzenie profesjonalnej "Informacji Dodatkowej" do sprawozdania finansowego.
- 
+
 WYMAGANIA PRAWNE (Ustawa o Rachunkowości, Dz.U. z 2023 r. poz. 120):
 - Art. 48 UoR: Informacja dodatkowa obejmuje wprowadzenie i dodatkowe informacje i objaśnienia
 - Stosuj Krajowe Standardy Rachunkowości (KSR)
 - Używaj zasad wyceny zgodnych z UoR
- 
+
 STRUKTURA DOKUMENTU (obowiązkowa):
 1. WPROWADZENIE DO SPRAWOZDANIA FINANSOWEGO
    1.1 Dane identyfikacyjne jednostki
@@ -432,7 +446,7 @@ STRUKTURA DOKUMENTU (obowiązkowa):
    1.4 Metody amortyzacji i stosowane stawki/okresy ekonomicznej użyteczności
    1.5 Zasady rozliczania przychodów i kosztów
    1.6 Korekty błędów i zmiany polityki rachunkowości
- 
+
 2. DODATKOWE INFORMACJE I OBJAŚNIENIA
    2.1 Szczegółowy zakres zmian wartości grup rodzajowych środków trwałych
        (wartość brutto, odpisy amortyzacyjne/umorzeniowe, wartość netto)
@@ -452,18 +466,18 @@ STRUKTURA DOKUMENTU (obowiązkowa):
    2.15 Wynagrodzenia organów spółki
    2.16 Zdarzenia po dniu bilansowym
    2.17 Inne istotne informacje
- 
+
 STYL I JĘZYK:
 - Profesjonalne słownictwo: "wartość netto aktywów", "odpisy amortyzacyjne", "kapitał własny"
 - Liczby w PLN z dokładnością do groszy lub w tysiącach PLN (konsekwentnie)
 - Tryb oznajmujący, strona bierna, czas przeszły dla zdarzeń roku
 - Odesłania do konkretnych not i pozycji bilansu
- 
+
 WAŻNE: Jeśli dane finansowe są dostępne w dokumentach – cytuj je dokładnie.
 Jeśli brakuje danych – zaznacz "[DANE DO UZUPEŁNIENIA]" i opisz co powinno się znaleźć.
 Jeśli dostarczono dokument Polityki Rachunkowości – sekcja 1.2–1.5 musi być oparta WYŁĄCZNIE na jego treści."""
- 
- 
+
+
 def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
                                company_name: str, year: int,
                                company_info: dict = None,
@@ -473,7 +487,7 @@ def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
     """
     client = anthropic.Anthropic(api_key=anthropic_api_key)
     info = company_info or {}
- 
+
     # Sekcja zagrożenia kontynuacji
     zagrozenie_blok = ""
     if info.get("zagrozenie_kontynuacji"):
@@ -483,7 +497,7 @@ def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
             "OBOWIĄZKOWO opisz te okoliczności i ich wpływ na wycenę aktywów i pasywów.\n"
             f"Opis okoliczności: {info.get('zagrozenie_opis', '')}\n"
         )
- 
+
     # Przygotuj kontekst z dokumentów
     context_parts = [
         f"NAZWA JEDNOSTKI: {info.get('nazwa') or company_name}",
@@ -506,34 +520,34 @@ def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
         context_parts.append(doc_data["text"][:8000])
         if len(doc_data["text"]) > 8000:
             context_parts.append("...[tekst skrócony]")
- 
+
     full_context = "\n".join(context_parts)
- 
+
     user_prompt = f"""Na podstawie poniższych dokumentów finansowych sporządź kompletną "Informację Dodatkową" do sprawozdania finansowego za rok {year}.
- 
+
 {full_context}
- 
+
 Wygeneruj pełną Informację Dodatkową zgodnie z polską Ustawą o Rachunkowości.
 Gdzie masz dane – użyj konkretnych liczb. Gdzie brakuje – napisz [DANE DO UZUPEŁNIENIA].
 Formatuj wyraźnie nagłówkami i akapitami."""
- 
+
     if progress_callback:
         progress_callback(0.7, "Generowanie przez Claude 3.5 Sonnet...")
- 
+
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=8000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}]
     )
- 
+
     return response.content[0].text
- 
- 
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODUŁ 5: EKSPORT DO WORD (.docx)
 # ═══════════════════════════════════════════════════════════════════════════════
- 
+
 def add_horizontal_rule(doc: Document):
     """Dodaje poziomą linię jako separator."""
     p = doc.add_paragraph()
@@ -546,43 +560,43 @@ def add_horizontal_rule(doc: Document):
     bottom.set(qn("w:color"), "2d6a9f")
     pBdr.append(bottom)
     pPr.append(pBdr)
- 
- 
+
+
 def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
     """
     Konwertuje wygenerowaną treść AI na sformatowany plik .docx.
     """
     doc = Document()
- 
+
     # Style
     style = doc.styles["Normal"]
     style.font.name = "Calibri"
     style.font.size = Pt(11)
- 
+
     # Marginesy
     for section in doc.sections:
         section.left_margin = Inches(1.2)
         section.right_margin = Inches(1.2)
         section.top_margin = Inches(1.0)
         section.bottom_margin = Inches(1.0)
- 
+
     # Strona tytułowa
     title = doc.add_heading("INFORMACJA DODATKOWA", 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for run in title.runs:
         run.font.color.rgb = RGBColor(0x1e, 0x3a, 0x5f)
         run.font.size = Pt(18)
- 
+
     subtitle = doc.add_paragraph(f"do sprawozdania finansowego za rok obrotowy {year}")
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for run in subtitle.runs:
         run.font.size = Pt(13)
         run.font.color.rgb = RGBColor(0x2d, 0x6a, 0x9f)
- 
+
     doc.add_paragraph(f"Jednostka: {company_name}").alignment = WD_ALIGN_PARAGRAPH.CENTER
     add_horizontal_rule(doc)
     doc.add_page_break()
- 
+
     # Parsowanie i formatowanie treści
     lines = generated_text.split("\n")
     for line in lines:
@@ -590,7 +604,7 @@ def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
         if not line:
             doc.add_paragraph()
             continue
- 
+
         # Nagłówki markdown
         if line.startswith("#### "):
             h = doc.add_heading(line[5:], level=4)
@@ -622,7 +636,7 @@ def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
                     run.bold = True
                 else:
                     p.add_run(part)
- 
+
     # Stopka
     add_horizontal_rule(doc)
     footer_p = doc.add_paragraph(
@@ -632,22 +646,22 @@ def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
     for run in footer_p.runs:
         run.font.size = Pt(9)
         run.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
- 
+
     # Zapis do bufora
     buffer = io.BytesIO()
     doc.save(buffer)
     return buffer.getvalue()
- 
- 
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GŁÓWNY INTERFEJS STREAMLIT
 # ═══════════════════════════════════════════════════════════════════════════════
- 
+
 # ── Odczyt kluczy z Streamlit Secrets (jeśli ustawione) ─────────────────────
 _anthropic_from_secrets = st.secrets.get("ANTHROPIC_API_KEY", "")
 _llama_from_secrets = st.secrets.get("LLAMA_API_KEY", "")
 _app_password = st.secrets.get("APP_PASSWORD", "")
- 
+
 # ── Ochrona hasłem ───────────────────────────────────────────────────────────────────────────
 if _app_password:
     if not st.session_state.get("authenticated"):
@@ -671,11 +685,11 @@ if _app_password:
                 else:
                     st.error("❌ Nieprawiłowe hasło")
         st.stop()
- 
+
 # ── Sidebar: Konfiguracja ────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Konfiguracja")
- 
+
     if _anthropic_from_secrets:
         st.success("🔑 Klucz API Anthropic: wczytany automatycznie")
         anthropic_key = _anthropic_from_secrets
@@ -686,7 +700,7 @@ with st.sidebar:
             placeholder="sk-ant-...",
             help="Wymagany do generowania przez Claude 3.5 Sonnet"
         )
- 
+
     if _llama_from_secrets:
         st.success("🦙 Klucz LlamaParse: wczytany automatycznie")
         llama_key = _llama_from_secrets
@@ -697,10 +711,10 @@ with st.sidebar:
             placeholder="llx-...",
             help="Dla lepszej ekstrakcji tabel. Bez niego użyty zostanie pypdf."
         )
- 
+
     st.divider()
     st.subheader("🏢 Dane jednostki")
- 
+
     # ── Pobieranie z KRS po NIP ──────────────────────────────────────────
     krs_input = st.text_input(
         "🔍 Numer KRS spółki",
@@ -710,7 +724,7 @@ with st.sidebar:
     st.caption("ℹ️ Oficjalne API KRS działa po numerze KRS (nie NIP). NIP uzupełnisz ręcznie.")
     debug_krs = st.checkbox("🔍 Tryb diagnostyczny KRS", value=False,
                              help="Pokaż surową odpowiedź API KRS — pomocne przy błędach")
- 
+
     if st.button("⬇️ Pobierz dane z KRS", use_container_width=True):
         if krs_input:
             with st.spinner("Pobieranie z API KRS Ministerstwa Sprawiedliwości..."):
@@ -733,9 +747,9 @@ with st.sidebar:
                     st.error(f"❌ Błąd: {e}")
         else:
             st.warning("Wpisz numer KRS aby pobrać dane.")
- 
+
     krs = st.session_state.get("krs_data", {})
- 
+
     company_name = st.text_input("Nazwa spółki",
                                   value=krs.get("nazwa", ""),
                                   placeholder="XYZ Sp. z o.o.")
@@ -760,13 +774,13 @@ with st.sidebar:
     company_forma = st.text_input("Forma prawna",
                                    value=krs.get("forma_prawna", ""),
                                    placeholder="np. SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ")
- 
+
     st.divider()
     st.subheader("📅 Okres sprawozdawczy")
     okres_od = st.date_input("Od", value=date(date.today().year - 1, 1, 1))
     okres_do = st.date_input("Do", value=date(date.today().year - 1, 12, 31))
     fiscal_year = okres_do.year
- 
+
     st.divider()
     st.subheader("⚠️ Kontynuacja działalności")
     zagrozenie_kontynuacji = st.checkbox(
@@ -783,7 +797,7 @@ with st.sidebar:
         )
     else:
         zagrozenie_opis = ""
- 
+
     st.divider()
     st.markdown("""
     **📋 Obsługiwane dokumenty:**
@@ -795,11 +809,11 @@ with st.sidebar:
     - 📝 Noty objaśniające
     - ⚖️ Zestawienie Obrotów i Sald (ZOiS)
     """)
- 
- 
+
+
 # ── Główna sekcja ────────────────────────────────────────────────────────────
 col1, col2 = st.columns([1, 1])
- 
+
 with col1:
     st.markdown('<div class="step-card"><b>📁 Krok 1:</b> Wgraj dokumenty PDF sprawozdania</div>',
                 unsafe_allow_html=True)
@@ -809,76 +823,76 @@ with col1:
         accept_multiple_files=True,
         help="Wgraj 3-6 dokumentów: bilans, RZiS, noty, przepływy pieniężne"
     )
- 
+
     if uploaded_files:
         st.success(f"✅ Wgrano {len(uploaded_files)} plik(ów)")
         for f in uploaded_files:
             size_kb = len(f.getvalue()) // 1024
             st.caption(f"📄 {f.name} ({size_kb} KB)")
- 
+
 with col2:
     st.markdown('<div class="step-card"><b>🔍 Krok 2:</b> Walidacja i mapowanie dokumentów</div>',
                 unsafe_allow_html=True)
- 
+
     if not anthropic_key:
         st.info("👈 Wprowadź klucz API Anthropic w panelu bocznym, aby kontynuować.")
     elif not uploaded_files:
         st.info("👈 Wgraj pliki PDF, aby rozpocząć.")
     elif not company_name:
         st.warning("⚠️ Wprowadź nazwę spółki w panelu bocznym.")
- 
+
 # ── Przycisk uruchomienia ────────────────────────────────────────────────────
 st.divider()
- 
+
 run_disabled = not (anthropic_key and uploaded_files and company_name)
 if st.button("🚀 Generuj Informację Dodatkową", type="primary",
               disabled=run_disabled, use_container_width=True):
- 
+
     progress_bar = st.progress(0)
     status_text = st.empty()
     results_container = st.container()
- 
+
     try:
         # ── KROK 1: Parsowanie ──────────────────────────────────────────────
         status_text.info("📄 Krok 1/4: Parsowanie dokumentów PDF...")
         progress_bar.progress(10)
- 
+
         def update_progress(val, msg):
             progress_bar.progress(int(10 + val * 20))
             status_text.info(f"📄 {msg}")
- 
+
         if llama_key:
             parsed = parse_documents_llamaparse(uploaded_files, llama_key, update_progress)
         else:
             parsed = parse_documents_fallback(uploaded_files, update_progress)
- 
+
         progress_bar.progress(30)
         st.session_state["parsed_docs"] = parsed
- 
+
         # ── KROK 2: Mapowanie ───────────────────────────────────────────────
         status_text.info("🗂️ Krok 2/4: Mapowanie i identyfikacja dokumentów...")
         progress_bar.progress(40)
         doc_mapping = map_documents(parsed)
         st.session_state["doc_mapping"] = doc_mapping
- 
+
         # ── SPRAWDZENIE BRAKUJĄCYCH DOKUMENTÓW ─────────────────────────────
         missing = check_missing_documents(doc_mapping)
         if missing:
             progress_bar.empty()
             status_text.empty()
- 
+
             st.warning("⚠️ Nie znaleziono wszystkich dokumentów w wgranych plikach.")
- 
+
             st.markdown("**Brakujące dokumenty:**")
             for dt in missing:
                 info = REQUIRED_DOC_TYPES[dt]
                 st.markdown(
                     f"- {info['icon']} **{info['label']}** — {info['desc']}"
                 )
- 
+
             st.markdown("---")
             st.markdown("**Co chcesz zrobić?**")
- 
+
             col_a, col_b = st.columns(2)
             with col_a:
                 if st.button("▶️ Kontynuuj bez brakujących dokumentów",
@@ -890,27 +904,27 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                               use_container_width=True):
                     st.session_state["missing_decision"] = "cancel"
                     st.rerun()
- 
+
             st.info(
                 "💡 Wskazówka: Jeśli plik zawiera kilka dokumentów w jednym PDF "
                 "(np. Bilans + RZiS razem), aplikacja może nie rozpoznać drugiego. "
                 "Spróbuj wgrać je jako osobne pliki."
             )
             st.stop()
- 
+
         # Jeśli użytkownik wrócił po decyzji
         decision = st.session_state.pop("missing_decision", None)
         if decision == "cancel":
             st.info("Wgraj brakujące pliki i uruchom ponownie.")
             st.stop()
- 
+
         # (decision == "continue" lub brak braków — kontynuuj normalnie)
- 
+
         # ── KROK 3: Walidacja ───────────────────────────────────────────────
         status_text.info("✅ Krok 3/4: Walidacja spójności danych...")
         progress_bar.progress(55)
         validation_issues = validate_data_consistency(doc_mapping)
- 
+
         with results_container:
             st.subheader("📋 Raport mapowania i walidacji")
             map_cols = st.columns(len(doc_mapping))
@@ -922,17 +936,17 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                         <small>{fname}</small><br>
                         <small>{ddata['length']:,} znaków</small>
                     </div>""", unsafe_allow_html=True)
- 
+
             st.subheader("🔎 Walidacja danych")
             for issue in validation_issues:
                 css = {"OK": "validation-ok", "WARN": "validation-warn", "ERR": "validation-err"}
                 st.markdown(f'<span class="{css.get(issue["level"], "")}">{issue["msg"]}</span>',
                             unsafe_allow_html=True)
- 
+
         # ── KROK 4: Generowanie ─────────────────────────────────────────────
         status_text.info("🤖 Krok 4/4: Generowanie przez Claude 3.5 Sonnet (może potrwać 1-2 min)...")
         progress_bar.progress(65)
- 
+
         company_info = {
             "nazwa": company_name,
             "siedziba": company_siedziba,
@@ -957,14 +971,14 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
         )
         st.session_state["generated_text"] = generated_text
         progress_bar.progress(88)
- 
+
         # ── KROK 5: Eksport do Word ─────────────────────────────────────────
         status_text.info("💾 Generowanie pliku Word...")
         docx_bytes = save_to_word(generated_text, company_name, fiscal_year)
         st.session_state["docx_bytes"] = docx_bytes
         progress_bar.progress(100)
         status_text.success("✅ Informacja Dodatkowa wygenerowana pomyślnie!")
- 
+
         # ── Podgląd i pobieranie ────────────────────────────────────────────
         with results_container:
             st.divider()
@@ -978,10 +992,10 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                     type="primary",
                     use_container_width=True
                 )
- 
+
             with st.expander("👁️ Podgląd wygenerowanej treści", expanded=True):
                 st.markdown(generated_text)
- 
+
     except anthropic.AuthenticationError:
         st.error("❌ Nieprawidłowy klucz API Anthropic. Sprawdź wartość w panelu bocznym.")
     except anthropic.RateLimitError:
@@ -989,7 +1003,7 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
     except Exception as e:
         st.error(f"❌ Błąd: {e}")
         st.exception(e)
- 
+
 # ── Jeśli wyniki już są w sesji ──────────────────────────────────────────────
 elif "generated_text" in st.session_state:
     st.info("📝 Wyniki z poprzedniego uruchomienia (wgraj nowe pliki lub wciśnij Generuj ponownie).")
