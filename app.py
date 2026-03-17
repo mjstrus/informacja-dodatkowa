@@ -256,16 +256,25 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
         data_rej = naglowek.get("dataRejestracjiWKRS", "")
 
         # ── PKD — w dzial1.przedmiotDzialalnosci ─────────────────────────
+        # PKD może być w dzial1 lub dzial3 — sprawdzamy oba
         pkd = ""
-        pkd_section = dzial1.get("przedmiotDzialalnosci", {})
-        pkd_glowna = pkd_section.get("przedmiotPrzewazajacejDzialalnosci", [])
-        if isinstance(pkd_glowna, list) and pkd_glowna:
-            p0 = pkd_glowna[0]
-            kod_pkd = p0.get("kodDzialalnosci", "")
-            opis_pkd = p0.get("opis", "")
-            pkd = f"{kod_pkd} {opis_pkd}".strip()
-        elif isinstance(pkd_glowna, dict):
-            pkd = f"{pkd_glowna.get('kodDzialalnosci','')} {pkd_glowna.get('opis','')}".strip()
+        def _wyciagnij_pkd(sekcja):
+            lista = (sekcja.get("przedmiotPrzewazajacejDzialalnosci") or
+                     sekcja.get("przedmiotDzialalnosci") or [])
+            if isinstance(lista, list) and lista:
+                p0 = lista[0]
+                return f"{p0.get('kodDzialalnosci','')} {p0.get('opis','')}".strip()
+            if isinstance(lista, dict):
+                return f"{lista.get('kodDzialalnosci','')} {lista.get('opis','')}".strip()
+            return ""
+
+        for dzial_key in ["dzial1", "dzial3", "dzial2"]:
+            dzial = dane.get(dzial_key, {})
+            pkd_section = dzial.get("przedmiotDzialalnosci", {})
+            if pkd_section:
+                pkd = _wyciagnij_pkd(pkd_section)
+                if pkd:
+                    break
 
         return {
             "nazwa": nazwa,
