@@ -219,6 +219,98 @@ def fetch_krs_by_nip(nip: str) -> dict | None:
     return None
 
 
+def fetch_krs_by_nip_debug(nip: str) -> tuple[dict | None, str]:
+    """
+    Wersja diagnostyczna — próbuje wszystkich endpointów i zwraca log.
+    Zwraca (dane, log_tekstowy).
+    """
+    import json as _json
+    nip_clean = re.sub(r"[^0-9]", "", nip)
+    log_lines = [f"NIP po oczyszczeniu: {nip_clean}"]
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; InformacjaDodatkowa/1.0)"
+    }
+
+    endpoints = [
+        # Endpoint 1: wyszukaj po NIP
+        ("GET", f"https://api-krs.ms.gov.pl/api/krs/podmiot/wyszukaj",
+         {"nip": nip_clean, "strona": 1, "rekordyNaStronie": 1}),
+        # Endpoint 2: bezpośrednio podmiot po NIP
+        ("GET", f"https://api-krs.ms.gov.pl/api/krs/podmiot/nip/{nip_clean}", {}),
+        # Endpoint 3: OdpisAktualny po NIP (niektóre wersje API)
+        ("GET", f"https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/nip/{nip_clean}",
+         {"rejestr": "P", "format": "json"}),
+    ]
+
+    krs_nr = None
+    raw_data = None
+
+    for method, url, params in endpoints:
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=15)
+            log_lines.append(f"\n→ {url}")
+            log_lines.append(f"  Params: {params}")
+            log_lines.append(f"  Status: {r.status_code}")
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                    preview = _json.dumps(data, ensure_ascii=False, indent=2)[:1500]
+                    log_lines.append("  Odpowiedź (pierwsze 1500 znaków):\n" + preview)
+                    raw_data = data
+                    # Spróbuj wyciągnąć numer KRS
+                    if not krs_nr:
+                        for path in [
+                            lambda d: d.get("podmiotList", [{}])[0].get("numerKRS"),
+                            lambda d: d.get("numerKRS"),
+                            lambda d: d.get("nrKrs"),
+                            lambda d: d.get("odpis", {}).get("naglowekA", {}).get("numerKRS"),
+                        ]:
+                            try:
+                                val = path(data)
+                                if val:
+                                    krs_nr = str(val).zfill(10)
+                                    log_lines.append(f"  ✅ Znaleziono KRS: {krs_nr}")
+                                    break
+                            except Exception:
+                                pass
+                except Exception as e:
+                    log_lines.append(f"  Błąd parsowania JSON: {e}")
+                    log_lines.append(f"  Surowa odpowiedź: {r.text[:500]}")
+            else:
+                log_lines.append(f"  Treść błędu: {r.text[:300]}")
+        except Exception as e:
+            log_lines.append(f"  ❌ Wyjątek: {e}")
+
+    # Jeśli mamy numer KRS, pobierz odpis
+    if krs_nr:
+        try:
+            url = f"https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/{krs_nr}"
+            r = requests.get(url, params={"rejestr": "P", "format": "json"},
+                             headers=headers, timeout=20)
+            log_lines.append(f"\n→ Odpis aktualny: {url}")
+            log_lines.append(f"  Status: {r.status_code}")
+            if r.status_code == 200:
+                data = r.json()
+                log_lines.append(f"  Odpowiedź (pierwsze 1500 znaków):\n{_json.dumps(data, ensure_ascii=False, indent=2)[:1500]}")
+                parsed = _parse_odpis(data, krs_nr, nip_clean)
+                log_lines.append("\n✅ Sparsowane dane: " + _json.dumps(parsed, ensure_ascii=False, indent=2))
+                return parsed, "\n".join(log_lines)
+            else:
+                log_lines.append(f"  Błąd: {r.text[:300]}")
+        except Exception as e:
+            log_lines.append(f"  ❌ Wyjątek przy odpisie: {e}")
+    elif raw_data:
+        # Może mamy już dane w raw_data bez potrzeby drugiego kroku
+        parsed = _parse_odpis(raw_data, "", nip_clean)
+        if parsed and parsed.get("nazwa"):
+            log_lines.append("\n✅ Dane z bezpośredniego endpointu: " + _json.dumps(parsed, ensure_ascii=False, indent=2))
+            return parsed, "\n".join(log_lines)
+
+    log_lines.append("\n❌ Nie udało się pobrać danych.")
+    return None, "\n".join(log_lines)
+
+
 def _parse_odpis(data: dict, krs_nr: str = "", nip_clean: str = "") -> dict | None:
     """Wyciąga potrzebne pola z odpisu JSON zwróconego przez API KRS."""
     try:
@@ -734,27 +826,28 @@ with st.sidebar:
     # ── Pobieranie z KRS po NIP ──────────────────────────────────────────
     nip_input = st.text_input("🔍 NIP spółki", placeholder="1234567890",
                                help="Wpisz NIP i kliknij Pobierz z KRS")
+    debug_krs = st.checkbox("🔍 Tryb diagnostyczny KRS", value=False,
+                             help="Pokaż surową odpowiedź API KRS — pomocne przy błędach")
+
     if st.button("⬇️ Pobierz dane z KRS", use_container_width=True):
         if nip_input:
             with st.spinner("Pobieranie z API KRS Ministerstwa Sprawiedliwości..."):
                 try:
-                    krs_data = fetch_krs_by_nip(nip_input)
+                    krs_data, krs_debug = fetch_krs_by_nip_debug(nip_input)
+                    if debug_krs:
+                        st.code(krs_debug, language="json")
                     if krs_data:
                         st.session_state["krs_data"] = krs_data
                         st.success("✅ Dane pobrane z KRS!")
                     else:
                         st.error(
-                            "❌ Nie znaleziono podmiotu w KRS dla podanego NIP. "
-                            "Upewnij się że NIP jest poprawny i spółka jest wpisana do KRS "
-                            "(jednoosobowe działalności gospodarcze nie są w KRS). "
-                            "Możesz uzupełnić dane ręcznie poniżej."
+                            "❌ Nie znaleziono podmiotu. Sprawdź NIP lub uzupełnij ręcznie. "
+                            "Włącz tryb diagnostyczny aby zobaczyć odpowiedź API."
                         )
-                except ConnectionError:
-                    st.error("❌ Brak połączenia z API KRS. Sprawdź połączenie internetowe.")
-                except TimeoutError:
-                    st.error("❌ API KRS nie odpowiada. Spróbuj za chwilę.")
                 except Exception as e:
-                    st.error(f"❌ Błąd pobierania z KRS: {e}. Uzupełnij dane ręcznie.")
+                    st.error(f"❌ Błąd: {e}")
+                    if debug_krs:
+                        st.exception(e)
         else:
             st.warning("Wpisz NIP aby pobrać dane.")
 
