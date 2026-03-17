@@ -17,6 +17,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 import base64
+import requests
+from datetime import date
 
 # ─── PAGE CONFIG ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -136,6 +138,147 @@ def parse_documents_fallback(pdf_files: list, progress_callback=None) -> dict:
     return results
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODUŁ KRS: POBIERANIE DANYCH Z OFICJALNEGO API MINISTERSTWA SPRAWIEDLIWOŚCI
+# ═══════════════════════════════════════════════════════════════════════════════
+
+KRS_API_BASE = "https://api-krs.ms.gov.pl/api/krs/OdpisAktualny"
+KRS_SEARCH_BASE = "https://api-krs.ms.gov.pl/api/krs/podmiot"
+
+def fetch_krs_by_nip(nip: str) -> dict | None:
+    """
+    Pobiera dane spółki z oficjalnego API KRS Ministerstwa Sprawiedliwości.
+    Endpoint: api-krs.ms.gov.pl — bezpłatny, bez klucza API.
+    """
+    nip_clean = re.sub(r"[^0-9]", "", nip)
+    if len(nip_clean) != 10:
+        return None
+    try:
+        # Krok 1: znajdź numer KRS po NIP
+        search_url = f"https://api-krs.ms.gov.pl/api/krs/podmiot/wyszukaj"
+        params = {"nip": nip_clean, "strona": 1, "rekordyNaStronie": 1}
+        headers = {"Accept": "application/json"}
+        r = requests.get(search_url, params=params, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        podmioty = data.get("odpis", {}).get("dane", {}).get("dzialy", {})
+        # Spróbuj alternatywnej struktury
+        lista = data.get("podmiotList", data.get("response", {}).get("podmiotList", []))
+        if not lista:
+            # Spróbuj bezpośrednio po NIP w odpisie
+            return _fetch_odpis_by_nip_direct(nip_clean)
+        krs_nr = lista[0].get("numerKRS") or lista[0].get("nrKrs", "")
+        if not krs_nr:
+            return None
+        return _fetch_odpis_by_krs(krs_nr.zfill(10))
+    except Exception as e:
+        return _fetch_odpis_by_nip_direct(nip_clean)
+
+
+def _fetch_odpis_by_nip_direct(nip: str) -> dict | None:
+    """Próbuje pobrać odpis bezpośrednio przez endpoint podmiot z NIP."""
+    try:
+        url = f"https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/nip/{nip}"
+        r = requests.get(url, headers={"Accept": "application/json"}, timeout=10)
+        if r.status_code == 200:
+            return _parse_odpis(r.json())
+        # Fallback: wyszukiwarka podmiotów
+        url2 = f"https://api-krs.ms.gov.pl/api/krs/podmiot/nip/{nip}"
+        r2 = requests.get(url2, headers={"Accept": "application/json"}, timeout=10)
+        if r2.status_code == 200:
+            data = r2.json()
+            krs_nr = (data.get("numerKRS") or
+                      data.get("nrKrs") or
+                      data.get("odpis", {}).get("numerKRS", ""))
+            if krs_nr:
+                return _fetch_odpis_by_krs(str(krs_nr).zfill(10))
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_odpis_by_krs(krs_nr: str) -> dict | None:
+    """Pobiera odpis aktualny po numerze KRS."""
+    try:
+        url = f"https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/{krs_nr}"
+        params = {"rejestr": "P", "format": "json"}
+        r = requests.get(url, params=params,
+                         headers={"Accept": "application/json"}, timeout=15)
+        if r.status_code == 200:
+            return _parse_odpis(r.json())
+    except Exception:
+        pass
+    return None
+
+
+def _parse_odpis(data: dict) -> dict | None:
+    """Wyciąga potrzebne pola z odpowiedzi API KRS."""
+    try:
+        odpis = data.get("odpis", data)
+        dane = odpis.get("dane", odpis)
+        dzial1 = dane.get("dzial1", {})
+        dzial1_dane = dzial1.get("danePodmiotu", dzial1)
+
+        # Nazwa
+        nazwa = (dzial1_dane.get("nazwa") or
+                 dzial1_dane.get("nazwaPelna") or
+                 dane.get("nazwa") or "")
+
+        # Siedziba
+        siedziba_raw = (dzial1_dane.get("siedzibaIAdres") or
+                        dzial1_dane.get("siedziba") or
+                        dane.get("siedzibaIAdres") or {})
+        if isinstance(siedziba_raw, dict):
+            miasto = siedziba_raw.get("miasto") or siedziba_raw.get("miejscowosc") or ""
+            ulica = siedziba_raw.get("ulica") or ""
+            nr_domu = siedziba_raw.get("nrDomu") or siedziba_raw.get("numerDomu") or ""
+            kod = siedziba_raw.get("kodPocztowy") or ""
+            siedziba = f"{ulica} {nr_domu}, {kod} {miasto}".strip(", ")
+        else:
+            siedziba = str(siedziba_raw)
+
+        # NIP, KRS, REGON
+        nip_val = (dzial1_dane.get("nip") or dane.get("nip") or
+                   odpis.get("naglowekA", {}).get("nip") or "")
+        krs_val = (odpis.get("naglowekA", {}).get("numerKRS") or
+                   dane.get("numerKRS") or dzial1_dane.get("numerKRS") or "")
+        regon_val = (dzial1_dane.get("regon") or dane.get("regon") or "")
+
+        # PKD — główny przedmiot działalności
+        pkd_lista = (dzial1.get("przedmiotDzialalnosci", {})
+                     .get("przedmiotPrzewazajacejDzialalnosci", []))
+        if isinstance(pkd_lista, list) and pkd_lista:
+            pkd_item = pkd_lista[0]
+            pkd_kod = pkd_item.get("kodDzialalnosci", "")
+            pkd_opis = pkd_item.get("opis", "")
+            pkd = f"{pkd_kod} {pkd_opis}".strip()
+        else:
+            pkd = ""
+
+        # Data rejestracji / czas trwania działalności
+        data_rej = (odpis.get("naglowekA", {}).get("dataRejestracjiWKRS") or
+                    dzial1_dane.get("dataRejestracji") or
+                    dane.get("dataWpisuDoRejestru") or "")
+
+        # Forma prawna
+        forma = (dzial1_dane.get("formaPrawna") or
+                 dane.get("formaPrawna") or "")
+
+        return {
+            "nazwa": nazwa,
+            "siedziba": siedziba,
+            "nip": nip_val,
+            "krs": krs_val,
+            "regon": regon_val,
+            "pkd": pkd,
+            "data_rejestracji": data_rej,
+            "forma_prawna": forma,
+        }
+    except Exception:
+        return None
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODUŁ 2: IDENTYFIKACJA I MAPOWANIE DOKUMENTÓW
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -178,6 +321,14 @@ REQUIRED_DOC_TYPES = {
         "icon": "📝",
         "desc": "Dodatkowe noty i objaśnienia do pozycji sprawozdania",
         "keywords": ["nota ", "objaśnienie", "dodatkowe informacje"],
+    },
+    "ZOiS": {
+        "label": "Zestawienie Obrotów i Sald",
+        "icon": "⚖️",
+        "desc": "Obroty i salda kont księgi głównej za rok obrotowy",
+        "keywords": ["zestawienie obrotów", "obroty i salda", "salda końcowe",
+                     "salda otwarcia", "obroty narastająco", "konta syntetyczne",
+                     "księga główna", "salda debetowe", "salda kredytowe"],
     },
 }
 
@@ -328,16 +479,37 @@ Jeśli dostarczono dokument Polityki Rachunkowości – sekcja 1.2–1.5 musi by
 
 def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
                                company_name: str, year: int,
+                               company_info: dict = None,
                                progress_callback=None) -> str:
     """
     Krok 4: Wywołuje Claude 3.5 Sonnet do generowania Informacji Dodatkowej.
     """
     client = anthropic.Anthropic(api_key=anthropic_api_key)
+    info = company_info or {}
+
+    # Sekcja zagrożenia kontynuacji
+    zagrozenie_blok = ""
+    if info.get("zagrozenie_kontynuacji"):
+        zagrozenie_blok = (
+            "\n⚠️ WAŻNE: Jednostka zidentyfikowała OKOLICZNOŚCI ZAGROŻENIA KONTYNUOWANIA "
+            "DZIAŁALNOŚCI (art. 5 ust. 2 UoR). W sekcji dotyczącej zasad rachunkowości "
+            "OBOWIĄZKOWO opisz te okoliczności i ich wpływ na wycenę aktywów i pasywów.\n"
+            f"Opis okoliczności: {info.get('zagrozenie_opis', '')}\n"
+        )
 
     # Przygotuj kontekst z dokumentów
     context_parts = [
-        f"NAZWA JEDNOSTKI: {company_name}",
+        f"NAZWA JEDNOSTKI: {info.get('nazwa') or company_name}",
+        f"FORMA PRAWNA: {info.get('forma_prawna', '')}",
+        f"SIEDZIBA: {info.get('siedziba', '')}",
+        f"NIP: {info.get('nip', '')}",
+        f"NR KRS: {info.get('krs', '')}",
+        f"REGON: {info.get('regon', '')}",
+        f"GŁÓWNY PKD: {info.get('pkd', '')}",
+        f"DATA REJESTRACJI W KRS: {info.get('data_rejestracji', '')}",
+        f"OKRES SPRAWOZDAWCZY: od {info.get('okres_od', '')} do {info.get('okres_do', '')}",
         f"ROK OBROTOWY: {year}",
+        zagrozenie_blok,
         "=" * 60,
         "WYCIĄGI Z DOKUMENTÓW FINANSOWYCH:",
     ]
@@ -541,9 +713,71 @@ with st.sidebar:
 
     st.divider()
     st.subheader("🏢 Dane jednostki")
-    company_name = st.text_input("Nazwa spółki", placeholder="XYZ Sp. z o.o.")
-    fiscal_year = st.number_input("Rok obrotowy", min_value=2000, max_value=2030,
-                                   value=2024, step=1)
+
+    # ── Pobieranie z KRS po NIP ──────────────────────────────────────────
+    nip_input = st.text_input("🔍 NIP spółki", placeholder="1234567890",
+                               help="Wpisz NIP i kliknij Pobierz z KRS")
+    if st.button("⬇️ Pobierz dane z KRS", use_container_width=True):
+        if nip_input:
+            with st.spinner("Pobieranie z API KRS..."):
+                krs_data = fetch_krs_by_nip(nip_input)
+            if krs_data:
+                st.session_state["krs_data"] = krs_data
+                st.success("✅ Dane pobrane z KRS!")
+            else:
+                st.error("❌ Nie znaleziono podmiotu. Sprawdź NIP lub uzupełnij ręcznie.")
+        else:
+            st.warning("Wpisz NIP aby pobrać dane.")
+
+    krs = st.session_state.get("krs_data", {})
+
+    company_name = st.text_input("Nazwa spółki",
+                                  value=krs.get("nazwa", ""),
+                                  placeholder="XYZ Sp. z o.o.")
+    company_siedziba = st.text_input("Siedziba",
+                                      value=krs.get("siedziba", ""),
+                                      placeholder="ul. Przykładowa 1, 00-001 Warszawa")
+    company_nip = st.text_input("NIP",
+                                 value=krs.get("nip", nip_input),
+                                 placeholder="1234567890")
+    company_krs = st.text_input("Nr KRS",
+                                 value=krs.get("krs", ""),
+                                 placeholder="0000000000")
+    company_regon = st.text_input("REGON",
+                                   value=krs.get("regon", ""),
+                                   placeholder="000000000")
+    company_pkd = st.text_input("Główne PKD",
+                                 value=krs.get("pkd", ""),
+                                 placeholder="np. 69.20.Z Działalność rachunkowo-księgowa")
+    company_data_rej = st.text_input("Data rejestracji w KRS",
+                                      value=krs.get("data_rejestracji", ""),
+                                      placeholder="RRRR-MM-DD")
+    company_forma = st.text_input("Forma prawna",
+                                   value=krs.get("forma_prawna", ""),
+                                   placeholder="np. SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ")
+
+    st.divider()
+    st.subheader("📅 Okres sprawozdawczy")
+    okres_od = st.date_input("Od", value=date(date.today().year - 1, 1, 1))
+    okres_do = st.date_input("Do", value=date(date.today().year - 1, 12, 31))
+    fiscal_year = okres_do.year
+
+    st.divider()
+    st.subheader("⚠️ Kontynuacja działalności")
+    zagrozenie_kontynuacji = st.checkbox(
+        "Istnieją okoliczności wskazujące na zagrożenie kontynuowania działalności "
+        "w okresie co najmniej 12 miesięcy od dnia bilansowego",
+        value=False,
+        help="Art. 5 ust. 2 UoR — zaznacz jeśli istnieją takie okoliczności"
+    )
+    if zagrozenie_kontynuacji:
+        zagrozenie_opis = st.text_area(
+            "Opis okoliczności zagrożenia:",
+            placeholder="Opisz okoliczności wskazujące na zagrożenie kontynuowania działalności...",
+            height=100
+        )
+    else:
+        zagrozenie_opis = ""
 
     st.divider()
     st.markdown("""
@@ -554,6 +788,7 @@ with st.sidebar:
     - 💸 Przepływy pieniężne
     - 📜 Polityka rachunkowości
     - 📝 Noty objaśniające
+    - ⚖️ Zestawienie Obrotów i Sald (ZOiS)
     """)
 
 
@@ -693,11 +928,26 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
         status_text.info("🤖 Krok 4/4: Generowanie przez Claude 3.5 Sonnet (może potrwać 1-2 min)...")
         progress_bar.progress(65)
 
+        company_info = {
+            "nazwa": company_name,
+            "siedziba": company_siedziba,
+            "nip": company_nip,
+            "krs": company_krs,
+            "regon": company_regon,
+            "pkd": company_pkd,
+            "data_rejestracji": company_data_rej,
+            "forma_prawna": company_forma,
+            "okres_od": str(okres_od),
+            "okres_do": str(okres_do),
+            "zagrozenie_kontynuacji": zagrozenie_kontynuacji,
+            "zagrozenie_opis": zagrozenie_opis,
+        }
         generated_text = generate_accounting_notes(
             doc_mapping=doc_mapping,
             anthropic_api_key=anthropic_key,
             company_name=company_name,
             year=fiscal_year,
+            company_info=company_info,
             progress_callback=lambda v, m: progress_bar.progress(int(65 + v * 20))
         )
         st.session_state["generated_text"] = generated_text
