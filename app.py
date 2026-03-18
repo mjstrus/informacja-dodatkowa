@@ -497,6 +497,31 @@ def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
     client = anthropic.Anthropic(api_key=anthropic_api_key)
     info = company_info or {}
 
+    # Sekcja polityki rachunkowości z odpowiedzi na pytania
+    polityka_blok = ""
+    pa = info.get("polityka_answers", {})
+    if pa:
+        polityka_blok = """
+\n📋 ZASADY RACHUNKOWOŚCI (odpowiedzi udzielone przez użytkownika — brak załączonej Polityki Rachunkowości):
+- Zasady ustalania wyniku finansowego: {wynik}
+- Wycena zapasów: {zapasy}
+- Amortyzacja środków trwałych: {amort}
+- Wycena należności: {nal}
+- Sposób sporządzania sprawozdania: {spr}
+- Rezerwa/aktywa z tytułu podatku odroczonego: {pod}
+- Ujęcie leasingu: {leas}
+{uwagi_blok}
+Na podstawie powyższych odpowiedzi wypełnij DOKŁADNIE sekcje 1.2–1.5 Informacji Dodatkowej.\n""".format(
+            wynik=pa.get("wynik_finansowy", ""),
+            zapasy=pa.get("wycena_zapasow", ""),
+            amort=pa.get("amortyzacja", ""),
+            nal=pa.get("wycena_naleznosci", ""),
+            spr=pa.get("sposob_sprawozdania", ""),
+            pod="TAK" if pa.get("podatek_odroczony") else "NIE",
+            leas=pa.get("leasing", ""),
+            uwagi_blok=f"- Dodatkowe uwagi: {pa['uwagi']}" if pa.get("uwagi") else ""
+        )
+
     # Sekcja zagrożenia kontynuacji
     zagrozenie_blok = ""
     if info.get("zagrozenie_kontynuacji"):
@@ -519,6 +544,7 @@ def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
         f"DATA REJESTRACJI W KRS: {info.get('data_rejestracji', '')}",
         f"OKRES SPRAWOZDAWCZY: od {info.get('okres_od', '')} do {info.get('okres_do', '')}",
         f"ROK OBROTOWY: {year}",
+        polityka_blok,
         zagrozenie_blok,
         "=" * 60,
         "WYCIĄGI Z DOKUMENTÓW FINANSOWYCH:",
@@ -929,6 +955,116 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
 
         # (decision == "continue" lub brak braków — kontynuuj normalnie)
 
+        # ── PYTANIA O POLITYKĘ RACHUNKOWOŚCI (gdy brak dokumentu) ──────────
+        types_found = {d["type"] for d in doc_mapping.values()}
+        if "POLITYKA RACHUNKOWOŚCI" not in types_found:
+            # Sprawdź czy pytania już zostały wypełnione
+            if not st.session_state.get("polityka_answers"):
+                progress_bar.empty()
+                status_text.empty()
+
+                st.warning(
+                    "📜 Nie załączono dokumentu **Polityki Rachunkowości**. "
+                    "Odpowiedz na poniższe pytania — zostaną one wykorzystane "
+                    "przy sporządzaniu sekcji 1.2–1.5 Informacji Dodatkowej."
+                )
+
+                with st.form("polityka_form"):
+                    st.subheader("📋 Zasady rachunkowości — pytania uzupełniające")
+
+                    q1 = st.selectbox(
+                        "1. Zasady ustalania wyniku finansowego:",
+                        options=[
+                            "Wariant porównawczy (układ rodzajowy kosztów)",
+                            "Wariant kalkulacyjny (układ funkcjonalny kosztów)",
+                        ],
+                        help="Dotyczy formy Rachunku Zysków i Strat (art. 47 UoR)"
+                    )
+
+                    q2_wycena = st.selectbox(
+                        "2a. Metoda wyceny zapasów:",
+                        options=[
+                            "FIFO (pierwsze weszło, pierwsze wyszło)",
+                            "LIFO (ostatnie weszło, pierwsze wyszło)",
+                            "Cena przeciętna (średnia ważona)",
+                            "Ceny ewidencyjne z odchyleniami",
+                            "Nie dotyczy (brak zapasów)",
+                        ]
+                    )
+
+                    q2_st = st.selectbox(
+                        "2b. Metoda amortyzacji środków trwałych:",
+                        options=[
+                            "Liniowa (równomierne odpisy przez cały okres)",
+                            "Degresywna (przyspieszone odpisy na początku)",
+                            "Jednorazowy odpis (niskocenne ST do 10 000 zł)",
+                            "Mieszana (liniowa i jednorazowa)",
+                        ]
+                    )
+
+                    q2_nal = st.selectbox(
+                        "2c. Wycena należności:",
+                        options=[
+                            "W wartości nominalnej z odpisami aktualizującymi",
+                            "W wartości nominalnej bez odpisów aktualizujących",
+                            "W wartości godziwej",
+                        ]
+                    )
+
+                    q3 = st.selectbox(
+                        "3. Sposób sporządzania sprawozdania finansowego:",
+                        options=[
+                            "Pełne sprawozdanie finansowe (standardowe)",
+                            "Uproszczone sprawozdanie finansowe (art. 46 ust. 5 UoR — jednostki małe)",
+                            "Sprawozdanie według Załącznika nr 4 UoR (mikro jednostki)",
+                            "Sprawozdanie według Załącznika nr 5 UoR (małe jednostki NGO)",
+                        ],
+                        help="Jednostki małe mogą stosować uproszczenia zgodnie z art. 46–50 UoR"
+                    )
+
+                    q4_podatek = st.checkbox(
+                        "Jednostka tworzy rezerwę i aktywa z tytułu odroczonego podatku dochodowego",
+                        value=True
+                    )
+
+                    q5_leasing = st.selectbox(
+                        "Ujęcie leasingu:",
+                        options=[
+                            "Według UoR (leasing operacyjny/finansowy wg ekonomicznej treści)",
+                            "Leasing operacyjny — wszystkie umowy traktowane jako operacyjny",
+                            "Nie dotyczy (brak umów leasingowych)",
+                        ]
+                    )
+
+                    uwagi = st.text_area(
+                        "Dodatkowe uwagi dotyczące polityki rachunkowości (opcjonalnie):",
+                        placeholder="np. szczególne zasady wyceny, zmiany polityki w roku obrotowym...",
+                        height=80
+                    )
+
+                    submitted = st.form_submit_button(
+                        "✅ Zatwierdź i kontynuuj generowanie",
+                        use_container_width=True, type="primary"
+                    )
+
+                if submitted:
+                    st.session_state["polityka_answers"] = {
+                        "wynik_finansowy": q1,
+                        "wycena_zapasow": q2_wycena,
+                        "amortyzacja": q2_st,
+                        "wycena_naleznosci": q2_nal,
+                        "sposob_sprawozdania": q3,
+                        "podatek_odroczony": q4_podatek,
+                        "leasing": q5_leasing,
+                        "uwagi": uwagi,
+                    }
+                    st.rerun()
+                else:
+                    st.stop()
+
+        # Pobierz odpowiedzi na pytania (jeśli były zadane)
+        polityka_answers = st.session_state.get("polityka_answers", {})
+
         # ── KROK 3: Walidacja ───────────────────────────────────────────────
         status_text.info("✅ Krok 3/4: Walidacja spójności danych...")
         progress_bar.progress(55)
@@ -969,6 +1105,7 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
             "okres_do": str(okres_do),
             "zagrozenie_kontynuacji": zagrozenie_kontynuacji,
             "zagrozenie_opis": zagrozenie_opis,
+            "polityka_answers": polityka_answers,
         }
         generated_text = generate_accounting_notes(
             doc_mapping=doc_mapping,
