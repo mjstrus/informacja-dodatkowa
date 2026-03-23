@@ -1093,12 +1093,11 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                     q_sprawozdanie = st.selectbox(
                         "2. Sposób sporządzania sprawozdania finansowego:",
                         options=[
-                            "Pełne sprawozdanie finansowe (standardowe)",
-                            "Uproszczone sprawozdanie finansowe (art. 46 ust. 5 UoR — jednostki małe)",
-                            "Sprawozdanie według Załącznika nr 4 UoR (mikro jednostki)",
-                            "Sprawozdanie według Załącznika nr 5 UoR (małe jednostki NGO)",
+                            "Wariant pełny (duże jednostki) — pełny bilans, RZiS (porównawczy lub kalkulacyjny), informacja dodatkowa, zestawienie zmian w kapitale, rachunek przepływów pieniężnych",
+                            "Wariant dla jednostek małych — uproszczony bilans i RZiS, brak obowiązku zestawienia zmian w kapitale i przepływów pieniężnych (o ile nie podlegają badaniu)",
+                            "Wariant dla jednostek mikro — minimalistyczny zakres danych, informacja dodatkowa ograniczona do absolutnego minimum",
                         ],
-                        help="Jednostki małe mogą stosować uproszczenia zgodnie z art. 46–50 UoR"
+                        help="Art. 45–50 UoR — zakres sprawozdania zależy od wielkości jednostki"
                     )
 
                     q_leasing = st.selectbox(
