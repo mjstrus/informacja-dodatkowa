@@ -338,7 +338,13 @@ REQUIRED_DOC_TYPES = {
         "desc": "Obroty i salda kont księgi głównej za rok obrotowy",
         "keywords": ["zestawienie obrotów", "obroty i salda", "salda końcowe",
                      "salda otwarcia", "obroty narastająco", "konta syntetyczne",
-                     "księga główna", "salda debetowe", "salda kredytowe"],
+                     "księga główna", "salda debetowe", "salda kredytowe",
+                     "obroty wn", "obroty ma", "saldo wn", "saldo ma",
+                     "bilans otwarcia", "obroty za okres", "saldo końcowe",
+                     "konto", "zespół 0", "zespół 1", "zespół 2", "zespół 4",
+                     "zespół 5", "zespół 7",
+                     "rozrachunki", "koszty według rodzajów",
+                     "bo wn", "bo ma"],
     },
 }
 
@@ -987,37 +993,56 @@ st.divider()
 run_disabled = not (anthropic_key and uploaded_files and company_name)
 if st.button("🚀 Generuj Informację Dodatkową", type="primary",
               disabled=run_disabled, use_container_width=True):
+    # Wyczyść poprzednie stany przy nowym uruchomieniu
+    st.session_state["run_generation"] = True
+    st.session_state.pop("missing_decision", None)
+    st.session_state.pop("polityka_answers", None)
+    st.session_state.pop("parsed_docs", None)
+    st.session_state.pop("doc_mapping", None)
+    st.rerun()
+
+# ── Pipeline generowania (działa na podstawie session_state) ─────────────────
+if st.session_state.get("run_generation") and anthropic_key and uploaded_files and company_name:
 
     progress_bar = st.progress(0)
     status_text = st.empty()
     results_container = st.container()
 
     try:
-        # ── KROK 1: Parsowanie ──────────────────────────────────────────────
-        status_text.info("📄 Krok 1/4: Parsowanie dokumentów PDF...")
-        progress_bar.progress(10)
+        # ── KROK 1: Parsowanie (tylko raz, wynik w session_state) ────────
+        if "parsed_docs" not in st.session_state:
+            status_text.info("📄 Krok 1/4: Parsowanie dokumentów PDF...")
+            progress_bar.progress(10)
 
-        def update_progress(val, msg):
-            progress_bar.progress(int(10 + val * 20))
-            status_text.info(f"📄 {msg}")
+            def update_progress(val, msg):
+                progress_bar.progress(int(10 + val * 20))
+                status_text.info(f"📄 {msg}")
 
-        if llama_key:
-            parsed = parse_documents_llamaparse(uploaded_files, llama_key, update_progress)
-        else:
-            parsed = parse_documents_fallback(uploaded_files, update_progress)
+            if llama_key:
+                parsed = parse_documents_llamaparse(uploaded_files, llama_key, update_progress)
+            else:
+                parsed = parse_documents_fallback(uploaded_files, update_progress)
 
+            st.session_state["parsed_docs"] = parsed
+
+        parsed = st.session_state["parsed_docs"]
         progress_bar.progress(30)
-        st.session_state["parsed_docs"] = parsed
 
-        # ── KROK 2: Mapowanie ───────────────────────────────────────────────
-        status_text.info("🗂️ Krok 2/4: Mapowanie i identyfikacja dokumentów...")
+        # ── KROK 2: Mapowanie (tylko raz) ────────────────────────────────
+        if "doc_mapping" not in st.session_state:
+            status_text.info("🗂️ Krok 2/4: Mapowanie i identyfikacja dokumentów...")
+            doc_mapping = map_documents(parsed)
+            st.session_state["doc_mapping"] = doc_mapping
+
+        doc_mapping = st.session_state["doc_mapping"]
         progress_bar.progress(40)
-        doc_mapping = map_documents(parsed)
-        st.session_state["doc_mapping"] = doc_mapping
 
         # ── SPRAWDZENIE BRAKUJĄCYCH DOKUMENTÓW ─────────────────────────────
         missing = check_missing_documents(doc_mapping)
-        if missing:
+        missing_decision = st.session_state.get("missing_decision")
+
+        if missing and missing_decision is None:
+            # Jeszcze nie podjęto decyzji — pokaż pytanie
             progress_bar.empty()
             status_text.empty()
 
@@ -1052,13 +1077,13 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
             )
             st.stop()
 
-        # Jeśli użytkownik wrócił po decyzji
-        decision = st.session_state.pop("missing_decision", None)
-        if decision == "cancel":
+        if missing_decision == "cancel":
+            st.session_state.pop("run_generation", None)
+            st.session_state.pop("missing_decision", None)
             st.info("Wgraj brakujące pliki i uruchom ponownie.")
             st.stop()
 
-        # (decision == "continue" lub brak braków — kontynuuj normalnie)
+        # (missing_decision == "continue" lub brak braków — kontynuuj normalnie)
 
         # ── PYTANIA O POLITYKĘ RACHUNKOWOŚCI (gdy brak dokumentu) ──────────
         types_found = {d["type"] for d in doc_mapping.values()}
@@ -1272,6 +1297,10 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
         progress_bar.progress(100)
         status_text.success("✅ Informacja Dodatkowa wygenerowana pomyślnie!")
 
+        # Wyczyść flagi pipeline'u (generowanie zakończone)
+        st.session_state.pop("run_generation", None)
+        st.session_state.pop("missing_decision", None)
+
         # ── Podgląd i pobieranie ────────────────────────────────────────────
         with results_container:
             st.divider()
@@ -1290,10 +1319,13 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                 st.markdown(generated_text)
 
     except anthropic.AuthenticationError:
+        st.session_state.pop("run_generation", None)
         st.error("❌ Nieprawidłowy klucz API Anthropic. Sprawdź wartość w panelu bocznym.")
     except anthropic.RateLimitError:
+        st.session_state.pop("run_generation", None)
         st.error("❌ Przekroczono limit zapytań API. Poczekaj chwilę i spróbuj ponownie.")
     except Exception as e:
+        st.session_state.pop("run_generation", None)
         st.error(f"❌ Błąd: {e}")
         st.exception(e)
 
