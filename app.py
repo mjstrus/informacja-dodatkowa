@@ -501,24 +501,129 @@ def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
     polityka_blok = ""
     pa = info.get("polityka_answers", {})
     if pa:
+        # Stałe bloki wyceny (pozycje bez wyboru — zawsze identyczne)
+        blok_wnip = (
+            "1. WARTOŚCI NIEMATERIALNE I PRAWNE (bez wyboru):\n"
+            "   - Wycena początkowa: według cen nabycia.\n"
+            "   - Amortyzacja: odpisy amortyzacyjne metodą liniową. Okresy amortyzacji odzwierciedlają "
+            "przewidywany czas ekonomicznej użyteczności (licencje na oprogramowanie — 2-5 lat, "
+            "koszty zakończonych prac rozwojowych — max. 5 lat).\n"
+            "   - Weryfikacja: raz w roku przegląd stawek amortyzacyjnych oraz ocena przesłanek "
+            "do odpisów aktualizujących z tytułu trwałej utraty wartości (KSR 4)."
+        )
+
+        blok_rat_stale = (
+            "   - Koszty finansowania: cena nabycia/koszt wytworzenia obejmuje koszty obsługi zobowiązań "
+            "(odsetki, prowizje) oraz różnice kursowe od zobowiązań w walutach obcych, "
+            "poniesione do momentu oddania środka do używania.\n"
+            "   - Komponenty: w przypadku istotnych środków trwałych o różnych okresach użytkowania "
+            "części składowych — podejście komponentowe (osobna amortyzacja).\n"
+            "   - Niskocenne składniki: o wartości poniżej 10 000 PLN odpisywane jednorazowo w koszty."
+        )
+
+        blok_aktywa_fin_stale = (
+            "   Inne aktywa finansowe:\n"
+            "   - Przeznaczone do obrotu: wyceniane w wartości godziwej przez wynik finansowy.\n"
+            "   - Utrzymywane do terminu wymagalności: wyceniane wg skorygowanej ceny nabycia (efektywna stopa procentowa).\n"
+            "   - Pożyczki udzielone i należności własne: w kwocie wymaganej zapłaty z zachowaniem zasady ostrożności."
+        )
+
+        blok_zapasy_stale = (
+            "   - Koszty wytworzenia: obejmują koszty bezpośrednie oraz uzasadnioną część pośrednich kosztów produkcji. "
+            "Koszty niewykorzystanych zdolności produkcyjnych odnoszone bezpośrednio w wynik finansowy.\n"
+            "   - Rozchód zapasów: ustalany metodą FIFO.\n"
+            "   - Odpisy aktualizujące: tworzone na zapasy wolnorotujące (>12 miesięcy) oraz o obniżonej przydatności."
+        )
+
+        blok_naleznosci = (
+            "6. NALEŻNOŚCI I ZOBOWIĄZANIA (bez wyboru):\n"
+            "   - Wycena: w kwocie wymaganej zapłaty (wraz z odsetkami na dzień bilansowy).\n"
+            "   - Odpisy aktualizujące należności: metoda indywidualna dla przeterminowanych >180 dni "
+            "oraz metoda ogólna (portfelowa) na podstawie historycznych wskaźników ściągalności.\n"
+            "   - Wycena walutowa: aktywa i pasywa w walutach obcych wg średniego kursu NBP "
+            "z dnia poprzedzającego dzień bilansowy."
+        )
+
+        blok_rezerwy = (
+            "7. REZERWY NA ŚWIADCZENIA PRACOWNICZE I INNE ZOBOWIĄZANIA (bez wyboru):\n"
+            "   - Rezerwy aktuarialne: na odprawy emerytalne i nagrody jubileuszowe wyceniane "
+            "metodą prognozowanych uprawnień jednostkowych.\n"
+            "   - Rezerwy na niewykorzystane urlopy: iloczyn dni niewykorzystanego urlopu "
+            "i średniej stawki dziennego wynagrodzenia powiększonej o narzuty ZUS.\n"
+            "   - Pozostałe rezerwy: na znane ryzyka (postępowania sądowe, naprawy gwarancyjne) "
+            "w kwocie wiarygodnie oszacowanej."
+        )
+
+        blok_podatek = (
+            "8. PODATEK ODROCZONY (bez wyboru):\n"
+            "   - Aktywa i rezerwy z tytułu odroczonego podatku dochodowego ustalane w związku "
+            "z przejściowymi różnicami między wartością bilansową a podatkową aktywów i pasywów.\n"
+            "   - Aktywa z tytułu podatku odroczonego rozpoznawane tylko do wysokości prawdopodobnego "
+            "dochodu podatkowego pozwalającego na ich potrącenie."
+        )
+
+        blok_rmp = (
+            "9. ROZLICZENIA MIĘDZYOKRESOWE PRZYCHODÓW (bez wyboru):\n"
+            "   - Obejmują m.in. otrzymane dotacje na sfinansowanie nabycia środków trwałych, "
+            "rozliczane równolegle do odpisów amortyzacyjnych tych środków."
+        )
+
         polityka_blok = """
-\n📋 ZASADY RACHUNKOWOŚCI (odpowiedzi udzielone przez użytkownika — brak załączonej Polityki Rachunkowości):
+📋 ZASADY RACHUNKOWOŚCI (odpowiedzi udzielone przez użytkownika — brak załączonej Polityki Rachunkowości):
+
+=== A. ZASADY OGÓLNE ===
 - Zasady ustalania wyniku finansowego: {wynik}
-- Wycena zapasów: {zapasy}
-- Amortyzacja środków trwałych: {amort}
-- Wycena należności: {nal}
 - Sposób sporządzania sprawozdania: {spr}
-- Rezerwa/aktywa z tytułu podatku odroczonego: {pod}
 - Ujęcie leasingu: {leas}
+- Rezerwa/aktywa z tytułu podatku odroczonego: {pod}
+
+=== B. METODY WYCENY AKTYWÓW I PASYWÓW ===
+
+{wnip}
+
+2. RZECZOWE AKTYWA TRWAŁE (wybór użytkownika):
+   - Wycena początkowa: {rat}
+{rat_stale}
+
+3. INWESTYCJE W NIERUCHOMOŚCI (wybór użytkownika):
+   - Wycena: {inwest}
+
+4. AKTYWA I PASYWA FINANSOWE (wybór użytkownika):
+   - Udziały w jednostkach podporządkowanych: {udzialy}
+{aktywa_fin_stale}
+
+5. ZAPASY (wybór użytkownika):
+   - Wycena bilansowa: {zapasy}
+{zapasy_stale}
+
+{naleznosci}
+
+{rezerwy}
+
+{podatek}
+
+{rmp}
 {uwagi_blok}
-Na podstawie powyższych odpowiedzi wypełnij DOKŁADNIE sekcje 1.2–1.5 Informacji Dodatkowej.\n""".format(
+
+Na podstawie powyższych odpowiedzi wypełnij DOKŁADNIE sekcje 1.2–1.5 Informacji Dodatkowej,
+opisując WSZYSTKIE metody wyceny aktywów i pasywów (punkty 1-9) w sposób profesjonalny.
+""".format(
             wynik=pa.get("wynik_finansowy", ""),
-            zapasy=pa.get("wycena_zapasow", ""),
-            amort=pa.get("amortyzacja", ""),
-            nal=pa.get("wycena_naleznosci", ""),
             spr=pa.get("sposob_sprawozdania", ""),
-            pod="TAK" if pa.get("podatek_odroczony") else "NIE",
             leas=pa.get("leasing", ""),
+            pod="TAK" if pa.get("podatek_odroczony") else "NIE",
+            wnip=blok_wnip,
+            rat=pa.get("rat_wycena", ""),
+            rat_stale=blok_rat_stale,
+            inwest=pa.get("inwestycje_nieruchomosci", ""),
+            udzialy=pa.get("udzialy_wycena", ""),
+            aktywa_fin_stale=blok_aktywa_fin_stale,
+            zapasy=pa.get("zapasy_wycena", ""),
+            zapasy_stale=blok_zapasy_stale,
+            naleznosci=blok_naleznosci,
+            rezerwy=blok_rezerwy,
+            podatek=blok_podatek,
+            rmp=blok_rmp,
             uwagi_blok=f"- Dodatkowe uwagi: {pa['uwagi']}" if pa.get("uwagi") else ""
         )
 
@@ -972,6 +1077,10 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                 with st.form("polityka_form"):
                     st.subheader("📋 Zasady rachunkowości — pytania uzupełniające")
 
+                    # ── A. ZASADY OGÓLNE ──────────────────────────────────────
+                    st.markdown("---")
+                    st.markdown("#### A. Zasady ogólne")
+
                     q1 = st.selectbox(
                         "1. Zasady ustalania wyniku finansowego:",
                         options=[
@@ -981,38 +1090,8 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                         help="Dotyczy formy Rachunku Zysków i Strat (art. 47 UoR)"
                     )
 
-                    q2_wycena = st.selectbox(
-                        "2a. Metoda wyceny zapasów:",
-                        options=[
-                            "FIFO (pierwsze weszło, pierwsze wyszło)",
-                            "LIFO (ostatnie weszło, pierwsze wyszło)",
-                            "Cena przeciętna (średnia ważona)",
-                            "Ceny ewidencyjne z odchyleniami",
-                            "Nie dotyczy (brak zapasów)",
-                        ]
-                    )
-
-                    q2_st = st.selectbox(
-                        "2b. Metoda amortyzacji środków trwałych:",
-                        options=[
-                            "Liniowa (równomierne odpisy przez cały okres)",
-                            "Degresywna (przyspieszone odpisy na początku)",
-                            "Jednorazowy odpis (niskocenne ST do 10 000 zł)",
-                            "Mieszana (liniowa i jednorazowa)",
-                        ]
-                    )
-
-                    q2_nal = st.selectbox(
-                        "2c. Wycena należności:",
-                        options=[
-                            "W wartości nominalnej z odpisami aktualizującymi",
-                            "W wartości nominalnej bez odpisów aktualizujących",
-                            "W wartości godziwej",
-                        ]
-                    )
-
-                    q3 = st.selectbox(
-                        "3. Sposób sporządzania sprawozdania finansowego:",
+                    q_sprawozdanie = st.selectbox(
+                        "2. Sposób sporządzania sprawozdania finansowego:",
                         options=[
                             "Pełne sprawozdanie finansowe (standardowe)",
                             "Uproszczone sprawozdanie finansowe (art. 46 ust. 5 UoR — jednostki małe)",
@@ -1022,18 +1101,86 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                         help="Jednostki małe mogą stosować uproszczenia zgodnie z art. 46–50 UoR"
                     )
 
-                    q4_podatek = st.checkbox(
-                        "Jednostka tworzy rezerwę i aktywa z tytułu odroczonego podatku dochodowego",
-                        value=True
-                    )
-
-                    q5_leasing = st.selectbox(
-                        "Ujęcie leasingu:",
+                    q_leasing = st.selectbox(
+                        "3. Ujęcie leasingu:",
                         options=[
                             "Według UoR (leasing operacyjny/finansowy wg ekonomicznej treści)",
                             "Leasing operacyjny — wszystkie umowy traktowane jako operacyjny",
                             "Nie dotyczy (brak umów leasingowych)",
                         ]
+                    )
+
+                    # ── B. METODY WYCENY AKTYWÓW (z wyborem) ──────────────────
+                    st.markdown("---")
+                    st.markdown("#### B. Metody wyceny aktywów i pasywów")
+                    st.info(
+                        "Poniższe pytania dotyczą metod wyceny wymaganych przez UoR. "
+                        "Pozycje oznaczone *(z wyborem)* wymagają wskazania stosowanej metody. "
+                        "Pozycje bez wyboru zostaną uzupełnione automatycznie wg standardowych zasad UoR."
+                    )
+
+                    # 2. Rzeczowe aktywa trwałe (z wyborem)
+                    st.markdown("**2. Rzeczowe aktywa trwałe** *(z wyborem)*")
+                    q_rat_wycena = st.selectbox(
+                        "Wycena początkowa rzeczowych aktywów trwałych:",
+                        options=[
+                            "Według cen nabycia, pomniejszonych o skumulowane odpisy amortyzacyjne oraz odpisy z tytułu trwałej utraty wartości",
+                            "Według kosztów wytworzenia, pomniejszonych o skumulowane odpisy amortyzacyjne oraz odpisy z tytułu trwałej utraty wartości",
+                        ],
+                        help="Art. 28 ust. 1 pkt 1 UoR"
+                    )
+
+                    # 3. Inwestycje w nieruchomości (z wyborem)
+                    st.markdown("**3. Inwestycje w nieruchomości** *(z wyborem)*")
+                    q_inwest_nieruch = st.selectbox(
+                        "Wycena inwestycji w nieruchomości:",
+                        options=[
+                            "Według cen nabycia (zasady jak dla środków trwałych)",
+                            "Według wartości godziwej (skutki przeszacowania odnoszone do pozostałych przychodów/kosztów operacyjnych)",
+                        ],
+                        help="Art. 28 ust. 1 pkt 1a UoR"
+                    )
+
+                    # 4. Aktywa i pasywa finansowe (z wyborem)
+                    st.markdown("**4. Udziały w jednostkach podporządkowanych** *(z wyborem)*")
+                    q_udzialy = st.selectbox(
+                        "Wycena udziałów w jednostkach podporządkowanych:",
+                        options=[
+                            "Metodą ceny nabycia pomniejszonej o odpisy z tytułu trwałej utraty wartości",
+                            "Metodą praw własności",
+                        ],
+                        help="Art. 28 ust. 1 pkt 4 UoR"
+                    )
+
+                    # 5. Zapasy (z wyborem)
+                    st.markdown("**5. Zapasy** *(z wyborem)*")
+                    q_zapasy_wycena = st.selectbox(
+                        "Wycena bilansowa zapasów:",
+                        options=[
+                            "Według cen nabycia, nie wyższych od cen sprzedaży netto",
+                            "Według kosztów wytworzenia, nie wyższych od cen sprzedaży netto",
+                        ],
+                        help="Art. 28 ust. 1 pkt 6 UoR"
+                    )
+
+                    # ── C. POZYCJE BEZ WYBORU (informacja) ────────────────────
+                    st.markdown("---")
+                    st.markdown("#### C. Pozycje wyceniane wg stałych zasad UoR (bez wyboru)")
+                    st.caption(
+                        "Poniższe pozycje zostaną automatycznie opisane w Informacji Dodatkowej "
+                        "zgodnie ze standardowymi zasadami wynikającymi z Ustawy o Rachunkowości:"
+                    )
+                    st.markdown("""
+- **1. Wartości niematerialne i prawne** — wycena wg cen nabycia, amortyzacja liniowa, przegląd stawek raz w roku (KSR 4)
+- **6. Należności i zobowiązania** — w kwocie wymaganej zapłaty, odpisy aktualizujące indywidualnie (>180 dni) i portfelowo, wycena walutowa wg kursu NBP
+- **7. Rezerwy na świadczenia pracownicze** — rezerwy aktuarialne (odprawy, jubileusze), rezerwa na niewykorzystane urlopy, pozostałe rezerwy
+- **8. Podatek odroczony** — aktywa i rezerwy z tytułu różnic przejściowych
+- **9. Rozliczenia międzyokresowe przychodów** — w tym dotacje rozliczane równolegle do amortyzacji
+                    """)
+
+                    q_podatek = st.checkbox(
+                        "Jednostka tworzy rezerwę i aktywa z tytułu odroczonego podatku dochodowego",
+                        value=True
                     )
 
                     uwagi = st.text_area(
@@ -1050,12 +1197,13 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                 if submitted:
                     st.session_state["polityka_answers"] = {
                         "wynik_finansowy": q1,
-                        "wycena_zapasow": q2_wycena,
-                        "amortyzacja": q2_st,
-                        "wycena_naleznosci": q2_nal,
-                        "sposob_sprawozdania": q3,
-                        "podatek_odroczony": q4_podatek,
-                        "leasing": q5_leasing,
+                        "sposob_sprawozdania": q_sprawozdanie,
+                        "leasing": q_leasing,
+                        "rat_wycena": q_rat_wycena,
+                        "inwestycje_nieruchomosci": q_inwest_nieruch,
+                        "udzialy_wycena": q_udzialy,
+                        "zapasy_wycena": q_zapasy_wycena,
+                        "podatek_odroczony": q_podatek,
                         "uwagi": uwagi,
                     }
                     st.rerun()
