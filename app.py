@@ -1180,54 +1180,207 @@ Formatuj wyraźnie nagłówkami i akapitami."""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MODUŁ 5: EKSPORT DO WORD (.docx)
+# MODUŁ 5: EKSPORT DO WORD (.docx) — PROFESJONALNA SZATA GRAFICZNA
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def add_horizontal_rule(doc: Document):
-    """Dodaje poziomą linię jako separator."""
+# Kolory firmowe
+_CLR_NAVY = RGBColor(0x1B, 0x2A, 0x4A)      # Nagłówki główne
+_CLR_BLUE = RGBColor(0x2D, 0x6A, 0x9F)       # Nagłówki sekcji
+_CLR_ACCENT = RGBColor(0x3A, 0x86, 0xC8)     # Akcent, linie
+_CLR_GRAY = RGBColor(0x66, 0x66, 0x66)       # Tekst pomocniczy
+_CLR_LIGHT = RGBColor(0x99, 0x99, 0x99)      # Stopka
+_CLR_BLACK = RGBColor(0x33, 0x33, 0x33)      # Tekst główny
+_CLR_TABLE_HEADER = "1B2A4A"                  # Tło nagłówka tabeli (hex)
+_CLR_TABLE_ALT = "F2F6FA"                     # Naprzemienne wiersze tabeli
+
+
+def _setup_styles(doc: Document):
+    """Konfiguruje style dokumentu."""
+    # Normal
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(10)
+    style.font.color.rgb = _CLR_BLACK
+    pf = style.paragraph_format
+    pf.space_before = Pt(0)
+    pf.space_after = Pt(4)
+    pf.line_spacing = 1.15
+
+    # Heading 1 — sekcje główne (np. "1. WPROWADZENIE...")
+    h1 = doc.styles["Heading 1"]
+    h1.font.name = "Calibri"
+    h1.font.size = Pt(14)
+    h1.font.bold = True
+    h1.font.color.rgb = _CLR_NAVY
+    h1.paragraph_format.space_before = Pt(18)
+    h1.paragraph_format.space_after = Pt(8)
+    h1.paragraph_format.keep_with_next = True
+
+    # Heading 2 — podsekcje (np. "1.1 Dane identyfikacyjne")
+    h2 = doc.styles["Heading 2"]
+    h2.font.name = "Calibri"
+    h2.font.size = Pt(12)
+    h2.font.bold = True
+    h2.font.color.rgb = _CLR_BLUE
+    h2.paragraph_format.space_before = Pt(12)
+    h2.paragraph_format.space_after = Pt(6)
+    h2.paragraph_format.keep_with_next = True
+
+    # Heading 3 — pod-podsekcje
+    h3 = doc.styles["Heading 3"]
+    h3.font.name = "Calibri"
+    h3.font.size = Pt(11)
+    h3.font.bold = True
+    h3.font.color.rgb = _CLR_NAVY
+    h3.paragraph_format.space_before = Pt(8)
+    h3.paragraph_format.space_after = Pt(4)
+
+    # Heading 4 — noty
+    h4 = doc.styles["Heading 4"]
+    h4.font.name = "Calibri"
+    h4.font.size = Pt(10)
+    h4.font.bold = True
+    h4.font.italic = True
+    h4.font.color.rgb = _CLR_BLUE
+    h4.paragraph_format.space_before = Pt(6)
+    h4.paragraph_format.space_after = Pt(3)
+
+
+def _add_separator(doc: Document, color: str = "2D6A9F", thickness: int = 6):
+    """Dodaje profesjonalną linię separatora."""
     p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(2)
+    p.paragraph_format.space_after = Pt(2)
     pPr = p._p.get_or_add_pPr()
     pBdr = OxmlElement("w:pBdr")
     bottom = OxmlElement("w:bottom")
     bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:sz"), str(thickness))
     bottom.set(qn("w:space"), "1")
-    bottom.set(qn("w:color"), "2d6a9f")
+    bottom.set(qn("w:color"), color)
     pBdr.append(bottom)
     pPr.append(pBdr)
 
 
+def _add_page_number(doc: Document):
+    """Dodaje numerację stron w stopce."""
+    for section in doc.sections:
+        footer = section.footer
+        footer.is_linked_to_previous = False
+        p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(0)
+
+        # Linia nad stopką
+        pPr = p._p.get_or_add_pPr()
+        pBdr = OxmlElement("w:pBdr")
+        top = OxmlElement("w:top")
+        top.set(qn("w:val"), "single")
+        top.set(qn("w:sz"), "4")
+        top.set(qn("w:space"), "4")
+        top.set(qn("w:color"), "CCCCCC")
+        pBdr.append(top)
+        pPr.append(pBdr)
+
+        run = p.add_run("Strona ")
+        run.font.size = Pt(8)
+        run.font.color.rgb = _CLR_LIGHT
+        run.font.name = "Calibri"
+
+        # Pole numeru strony
+        fldChar1 = OxmlElement("w:fldChar")
+        fldChar1.set(qn("w:fldCharType"), "begin")
+        run2 = p.add_run()
+        run2._r.append(fldChar1)
+
+        instrText = OxmlElement("w:instrText")
+        instrText.set(qn("xml:space"), "preserve")
+        instrText.text = " PAGE "
+        run3 = p.add_run()
+        run3.font.size = Pt(8)
+        run3.font.color.rgb = _CLR_LIGHT
+        run3._r.append(instrText)
+
+        fldChar2 = OxmlElement("w:fldChar")
+        fldChar2.set(qn("w:fldCharType"), "end")
+        run4 = p.add_run()
+        run4._r.append(fldChar2)
+
+
+def _add_header(doc: Document, company_name: str, year: int):
+    """Dodaje nagłówek dokumentu z nazwą firmy."""
+    for section in doc.sections:
+        header = section.header
+        header.is_linked_to_previous = False
+        p = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(0)
+
+        run = p.add_run(f"{company_name} | Informacja Dodatkowa {year}")
+        run.font.size = Pt(7)
+        run.font.color.rgb = _CLR_LIGHT
+        run.font.name = "Calibri"
+        run.font.italic = True
+
+        # Linia pod nagłówkiem
+        pPr = p._p.get_or_add_pPr()
+        pBdr = OxmlElement("w:pBdr")
+        bottom = OxmlElement("w:bottom")
+        bottom.set(qn("w:val"), "single")
+        bottom.set(qn("w:sz"), "4")
+        bottom.set(qn("w:space"), "4")
+        bottom.set(qn("w:color"), "CCCCCC")
+        pBdr.append(bottom)
+        pPr.append(pBdr)
+
+
+def _set_cell_shading(cell, color_hex: str):
+    """Ustawia kolor tła komórki."""
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:fill"), color_hex)
+    shading.set(qn("w:val"), "clear")
+    cell._tc.get_or_add_tcPr().append(shading)
+
+
 def add_markdown_table_to_doc(doc: Document, table_lines: list):
-    """Konwertuje linie markdown table (|...|) na sformatowaną tabelę Word."""
-    # Filtruj linie separatora (|---|---|...)
+    """Konwertuje linie markdown table na profesjonalnie sformatowaną tabelę Word."""
     data_lines = [l for l in table_lines if not re.match(r"^\|[\s\-:|]+$", l)]
     if not data_lines:
         return
 
-    # Parsuj komórki
     rows = []
     for line in data_lines:
         cells = [c.strip() for c in line.strip("|").split("|")]
         rows.append(cells)
-
     if not rows:
         return
 
     num_cols = max(len(r) for r in rows)
-    # Wyrównaj liczbę kolumn
     for r in rows:
         while len(r) < num_cols:
             r.append("")
 
     table = doc.add_table(rows=len(rows), cols=num_cols)
     try:
-        table.style = "Light Grid Accent 1"
+        table.style = "Table Grid"
     except KeyError:
-        try:
-            table.style = "Table Grid"
-        except KeyError:
-            pass  # Domyślny styl
+        pass
     table.autofit = True
+
+    # Ustaw obramowanie na delikatne szare linie
+    tbl = table._tbl
+    tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement("w:tblPr")
+    borders = OxmlElement("w:tblBorders")
+    for edge in ["top", "left", "bottom", "right", "insideH", "insideV"]:
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), "4")
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "B0B0B0")
+        borders.append(el)
+    tblPr.append(borders)
 
     for i, row_data in enumerate(rows):
         row = table.rows[i]
@@ -1235,63 +1388,160 @@ def add_markdown_table_to_doc(doc: Document, table_lines: list):
             cell = row.cells[j]
             cell.text = ""
             p = cell.paragraphs[0]
-            # Obsługa **bold** w komórkach
-            parts = re.split(r"(\*\*[^*]+\*\*)", cell_text)
-            for part in parts:
-                if part.startswith("**") and part.endswith("**"):
-                    run = p.add_run(part[2:-2])
-                    run.bold = True
-                    run.font.size = Pt(9)
-                    run.font.name = "Calibri"
-                else:
-                    run = p.add_run(part)
-                    run.font.size = Pt(9)
-                    run.font.name = "Calibri"
+            p.paragraph_format.space_before = Pt(2)
+            p.paragraph_format.space_after = Pt(2)
 
-            # Nagłówek (pierwszy wiersz) — pogrubiony
+            # Nagłówek (wiersz 0) — białe litery na ciemnym tle
             if i == 0:
-                for run in p.runs:
+                _set_cell_shading(cell, _CLR_TABLE_HEADER)
+                parts = re.split(r"(\*\*[^*]+\*\*)", cell_text)
+                for part in parts:
+                    clean = part.strip("*") if part.startswith("**") else part
+                    run = p.add_run(clean)
                     run.bold = True
-                    run.font.size = Pt(9)
+                    run.font.size = Pt(8)
+                    run.font.name = "Calibri"
+                    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            else:
+                # Naprzemienne wiersze
+                if i % 2 == 0:
+                    _set_cell_shading(cell, _CLR_TABLE_ALT)
 
-    # Dodaj pusty akapit po tabeli
-    doc.add_paragraph()
+                parts = re.split(r"(\*\*[^*]+\*\*)", cell_text)
+                for part in parts:
+                    if part.startswith("**") and part.endswith("**"):
+                        run = p.add_run(part[2:-2])
+                        run.bold = True
+                    else:
+                        run = p.add_run(part)
+                    run.font.size = Pt(8)
+                    run.font.name = "Calibri"
+                    run.font.color.rgb = _CLR_BLACK
+
+    doc.add_paragraph()  # Odstęp po tabeli
 
 
-def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
-    """
-    Konwertuje wygenerowaną treść AI na sformatowany plik .docx.
-    """
+def _add_title_page(doc: Document, company_name: str, year: int, company_info: dict = None):
+    """Tworzy profesjonalną stronę tytułową."""
+    info = company_info or {}
+
+    # Kilka pustych akapitów na górze dla wycentrowania
+    for _ in range(4):
+        doc.add_paragraph().paragraph_format.space_after = Pt(0)
+
+    # Linia dekoracyjna
+    _add_separator(doc, "2D6A9F", 12)
+
+    # Tytuł
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(16)
+    p.paragraph_format.space_after = Pt(4)
+    run = p.add_run("INFORMACJA DODATKOWA")
+    run.font.name = "Calibri"
+    run.font.size = Pt(22)
+    run.font.bold = True
+    run.font.color.rgb = _CLR_NAVY
+
+    # Podtytuł
+    p2 = doc.add_paragraph()
+    p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p2.paragraph_format.space_after = Pt(4)
+    run2 = p2.add_run("do sprawozdania finansowego")
+    run2.font.name = "Calibri"
+    run2.font.size = Pt(14)
+    run2.font.color.rgb = _CLR_BLUE
+
+    p3 = doc.add_paragraph()
+    p3.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p3.paragraph_format.space_after = Pt(12)
+    run3 = p3.add_run(f"za rok obrotowy {year}")
+    run3.font.name = "Calibri"
+    run3.font.size = Pt(14)
+    run3.font.color.rgb = _CLR_BLUE
+
+    _add_separator(doc, "2D6A9F", 12)
+
+    # Blok z danymi spółki
+    doc.add_paragraph().paragraph_format.space_after = Pt(8)
+
+    fields = [
+        ("Jednostka", info.get("nazwa") or company_name),
+        ("Forma prawna", info.get("forma_prawna", "")),
+        ("Siedziba", info.get("siedziba", "")),
+        ("NIP", info.get("nip", "")),
+        ("KRS", info.get("krs", "")),
+        ("REGON", info.get("regon", "")),
+        ("PKD", info.get("pkd", "")),
+        ("Okres sprawozdawczy", f"{info.get('okres_od', '')} — {info.get('okres_do', '')}"),
+    ]
+
+    for label, value in fields:
+        if not value or value == " — ":
+            continue
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(1)
+        p.paragraph_format.space_after = Pt(1)
+        run_label = p.add_run(f"{label}: ")
+        run_label.font.name = "Calibri"
+        run_label.font.size = Pt(10)
+        run_label.font.color.rgb = _CLR_GRAY
+        run_val = p.add_run(value)
+        run_val.font.name = "Calibri"
+        run_val.font.size = Pt(10)
+        run_val.font.bold = True
+        run_val.font.color.rgb = _CLR_NAVY
+
+    # Data generowania
+    doc.add_paragraph().paragraph_format.space_after = Pt(24)
+    p_date = doc.add_paragraph()
+    p_date.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_date = p_date.add_run(f"Wygenerowano: {date.today().strftime('%d.%m.%Y')}")
+    run_date.font.name = "Calibri"
+    run_date.font.size = Pt(9)
+    run_date.font.color.rgb = _CLR_LIGHT
+    run_date.font.italic = True
+
+    doc.add_page_break()
+
+
+def _add_rich_paragraph(doc: Document, line: str):
+    """Dodaje akapit z obsługą **bold** i zachowaniem formatowania."""
+    p = doc.add_paragraph()
+    parts = re.split(r"(\*\*[^*]+\*\*)", line)
+    for part in parts:
+        if part.startswith("**") and part.endswith("**"):
+            run = p.add_run(part[2:-2])
+            run.bold = True
+        else:
+            p.add_run(part)
+    return p
+
+
+def save_to_word(generated_text: str, company_name: str, year: int,
+                 company_info: dict = None) -> bytes:
+    """Konwertuje wygenerowaną treść AI na profesjonalny plik .docx."""
     doc = Document()
 
-    # Style
-    style = doc.styles["Normal"]
-    style.font.name = "Calibri"
-    style.font.size = Pt(11)
+    # Konfiguracja stylów
+    _setup_styles(doc)
 
-    # Marginesy
+    # Marginesy i rozmiar strony
     for section in doc.sections:
-        section.left_margin = Inches(1.2)
-        section.right_margin = Inches(1.2)
-        section.top_margin = Inches(1.0)
-        section.bottom_margin = Inches(1.0)
+        section.left_margin = Inches(1.0)
+        section.right_margin = Inches(1.0)
+        section.top_margin = Inches(0.8)
+        section.bottom_margin = Inches(0.7)
+        section.header_distance = Inches(0.3)
+        section.footer_distance = Inches(0.3)
+
+    # Nagłówek i stopka (numeracja stron)
+    _add_header(doc, company_name, year)
+    _add_page_number(doc)
 
     # Strona tytułowa
-    title = doc.add_heading("INFORMACJA DODATKOWA", 0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for run in title.runs:
-        run.font.color.rgb = RGBColor(0x1e, 0x3a, 0x5f)
-        run.font.size = Pt(18)
-
-    subtitle = doc.add_paragraph(f"do sprawozdania finansowego za rok obrotowy {year}")
-    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for run in subtitle.runs:
-        run.font.size = Pt(13)
-        run.font.color.rgb = RGBColor(0x2d, 0x6a, 0x9f)
-
-    doc.add_paragraph(f"Jednostka: {company_name}").alignment = WD_ALIGN_PARAGRAPH.CENTER
-    add_horizontal_rule(doc)
-    doc.add_page_break()
+    _add_title_page(doc, company_name, year, company_info)
 
     # Parsowanie i formatowanie treści
     lines = generated_text.split("\n")
@@ -1299,7 +1549,7 @@ def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
     while i < len(lines):
         line = lines[i].strip()
 
-        # Wykryj tabelę markdown (linia zaczyna się od |)
+        # Wykryj tabelę markdown
         if line.startswith("|") and "|" in line[1:]:
             table_lines = []
             while i < len(lines) and lines[i].strip().startswith("|"):
@@ -1311,52 +1561,45 @@ def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
         i += 1
 
         if not line:
-            doc.add_paragraph()
-            continue
+            continue  # Pomijamy puste linie (spacing robi swoje)
 
         # Nagłówki markdown
         if line.startswith("#### "):
-            h = doc.add_heading(line[5:], level=4)
+            doc.add_heading(line[5:], level=4)
         elif line.startswith("### "):
-            h = doc.add_heading(line[4:], level=3)
+            doc.add_heading(line[4:], level=3)
         elif line.startswith("## "):
             h = doc.add_heading(line[3:], level=2)
-            for run in h.runs:
-                run.font.color.rgb = RGBColor(0x1e, 0x3a, 0x5f)
         elif line.startswith("# "):
             h = doc.add_heading(line[2:], level=1)
-            for run in h.runs:
-                run.font.color.rgb = RGBColor(0x1e, 0x3a, 0x5f)
+        elif line.startswith("---"):
+            _add_separator(doc, "CCCCCC", 2)
         elif line.startswith("**") and line.endswith("**"):
             p = doc.add_paragraph()
             run = p.add_run(line.strip("*"))
             run.bold = True
+            run.font.color.rgb = _CLR_NAVY
         elif line.startswith("- ") or line.startswith("* "):
             doc.add_paragraph(line[2:], style="List Bullet")
         elif re.match(r"^\d+\.\s", line):
             doc.add_paragraph(line, style="List Number")
         else:
-            # Obsługa **bold** w środku tekstu
-            p = doc.add_paragraph()
-            parts = re.split(r"(\*\*[^*]+\*\*)", line)
-            for part in parts:
-                if part.startswith("**") and part.endswith("**"):
-                    run = p.add_run(part[2:-2])
-                    run.bold = True
-                else:
-                    p.add_run(part)
+            _add_rich_paragraph(doc, line)
 
-    # Stopka
-    add_horizontal_rule(doc)
-    footer_p = doc.add_paragraph(
-        f"Dokument wygenerowany automatycznie | {company_name} | Rok {year}"
-    )
+    # Stopka dokumentu
+    _add_separator(doc, "2D6A9F", 4)
+    footer_p = doc.add_paragraph()
     footer_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for run in footer_p.runs:
-        run.font.size = Pt(9)
-        run.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+    run = footer_p.add_run(
+        f"Informacja Dodatkowa | {company_name} | Rok obrotowy {year} | "
+        f"Wygenerowano {date.today().strftime('%d.%m.%Y')}"
+    )
+    run.font.size = Pt(8)
+    run.font.color.rgb = _CLR_LIGHT
+    run.font.name = "Calibri"
+    run.font.italic = True
 
-    # Zapis do bufora
+    # Zapis
     buffer = io.BytesIO()
     doc.save(buffer)
     return buffer.getvalue()
@@ -1874,8 +2117,8 @@ if st.session_state.get("run_generation") and anthropic_key and uploaded_files a
         progress_bar.progress(88)
 
         # ── KROK 5: Eksport do Word ─────────────────────────────────────────
-        status_text.info("💾 Generowanie pliku Word...")
-        docx_bytes = save_to_word(generated_text, company_name, fiscal_year)
+        status_text.info("💾 Krok 5/5: Generowanie pliku Word...")
+        docx_bytes = save_to_word(generated_text, company_name, fiscal_year, company_info)
         st.session_state["docx_bytes"] = docx_bytes
         progress_bar.progress(100)
         status_text.success("✅ Informacja Dodatkowa wygenerowana pomyślnie!")
