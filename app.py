@@ -366,13 +366,6 @@ REQUIRED_DOC_TYPES = {
                      "okres amortyzacji", "przyjęte zasady", "opis przyjętych"],
         "required": False,
     },
-    "NOTY OBJAŚNIAJĄCE": {
-        "label": "Noty objaśniające",
-        "icon": "📝",
-        "desc": "Dodatkowe noty i objaśnienia do pozycji sprawozdania",
-        "keywords": ["nota ", "objaśnienie", "dodatkowe informacje"],
-        "required": False,
-    },
     "ZOiS": {
         "label": "Zestawienie Obrotów i Sald",
         "icon": "⚖️",
@@ -854,6 +847,9 @@ def format_notes_for_prompt(selected_notes: list) -> str:
         "Noty obligatoryjne MUSZĄ być wypełnione danymi z dokumentów. "
         "Jeśli brakuje danych dla noty — wstaw [DANE DO UZUPEŁNIENIA]. "
         "Noty, których NIE MA na liście — NIE generuj.\n"
+        "WAŻNE: Jeśli dla danej noty WSZYSTKIE wartości liczbowe wynoszą 0 (zero), "
+        "NIE generuj tabeli — zamiast tego napisz krótko: "
+        "\"Nota X — [tytuł noty]: Nie dotyczy (wartości zerowe w okresie sprawozdawczym).\"\n"
     )
 
     return "\n".join(lines)
@@ -939,6 +935,7 @@ STYL I JĘZYK:
 - Tryb oznajmujący, strona bierna, czas przeszły dla zdarzeń roku
 - Odesłania do konkretnych not i pozycji bilansu
 - Tabele generuj w formacie MARKDOWN (| kolumna1 | kolumna2 |) — zostaną skonwertowane na tabele Word
+- ZASADA ZEROWYCH WARTOŚCI: Jeśli dla danej noty objaśniającej WSZYSTKIE wartości liczbowe wynoszą 0 (zero), NIE generuj tabeli. Zamiast tego napisz: "Nota X — [tytuł]: Nie dotyczy." Dotyczy to zarówno tabel, jak i opisów liczbowych.
 
 WAŻNE: Jeśli dane finansowe są dostępne w dokumentach – cytuj je dokładnie.
 Jeśli brakuje danych – zaznacz "[DANE DO UZUPEŁNIENIA]" i opisz co powinno się znaleźć.
@@ -1518,7 +1515,6 @@ with st.sidebar:
     - 🏗️ Tabela środków trwałych
     - 💸 Przepływy pieniężne
     - 📜 Polityka rachunkowości
-    - 📝 Noty objaśniające
     - ⚖️ Zestawienie Obrotów i Sald (ZOiS)
     - 📋 Ankieta bilansowa (wypełniona przez klienta)
     """)
