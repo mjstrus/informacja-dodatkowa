@@ -88,9 +88,29 @@ def extract_text_from_pdf_basic(pdf_bytes: bytes, filename: str) -> str:
         return f"[BŁĄD ekstrakcji {filename}: {e}]"
 
 
+def extract_text_from_docx(docx_bytes: bytes, filename: str) -> str:
+    """Ekstrakcja tekstu z pliku DOCX."""
+    try:
+        doc = Document(io.BytesIO(docx_bytes))
+        text_parts = [f"=== DOKUMENT: {filename} ===\n"]
+        for para in doc.paragraphs:
+            if para.text.strip():
+                text_parts.append(para.text)
+        # Wyciągnij też tekst z tabel
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                if row_text:
+                    text_parts.append(row_text)
+        return "\n".join(text_parts)
+    except Exception as e:
+        return f"[BŁĄD ekstrakcji DOCX {filename}: {e}]"
+
+
 def parse_documents_llamaparse(pdf_files: list, llama_api_key: str, progress_callback=None) -> dict:
     """
     Krok 1 & 2: Parsowanie PDF przez LlamaParse + identyfikacja dokumentów.
+    Pliki DOCX parsowane są bezpośrednio (bez LlamaParse).
     Zwraca słownik: {nazwa_pliku: tekst_markdown}
     """
     try:
@@ -109,6 +129,15 @@ def parse_documents_llamaparse(pdf_files: list, llama_api_key: str, progress_cal
         for idx, uploaded_file in enumerate(pdf_files):
             if progress_callback:
                 progress_callback(idx / len(pdf_files), f"Parsowanie: {uploaded_file.name}")
+
+            # DOCX — parsuj bezpośrednio
+            if uploaded_file.name.lower().endswith(".docx"):
+                results[uploaded_file.name] = extract_text_from_docx(
+                    uploaded_file.getvalue(), uploaded_file.name
+                )
+                continue
+
+            # PDF — przez LlamaParse
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                 tmp.write(uploaded_file.getvalue())
                 tmp_path = tmp.name
@@ -127,14 +156,20 @@ def parse_documents_llamaparse(pdf_files: list, llama_api_key: str, progress_cal
 
 
 def parse_documents_fallback(pdf_files: list, progress_callback=None) -> dict:
-    """Fallback: ekstrakcja przez pypdf."""
+    """Fallback: ekstrakcja przez pypdf (PDF) lub python-docx (DOCX)."""
     results = {}
     for idx, uploaded_file in enumerate(pdf_files):
         if progress_callback:
             progress_callback(idx / len(pdf_files), f"Ekstrakcja: {uploaded_file.name}")
-        results[uploaded_file.name] = extract_text_from_pdf_basic(
-            uploaded_file.getvalue(), uploaded_file.name
-        )
+
+        if uploaded_file.name.lower().endswith(".docx"):
+            results[uploaded_file.name] = extract_text_from_docx(
+                uploaded_file.getvalue(), uploaded_file.name
+            )
+        else:
+            results[uploaded_file.name] = extract_text_from_pdf_basic(
+                uploaded_file.getvalue(), uploaded_file.name
+            )
     return results
 
 
@@ -300,24 +335,28 @@ REQUIRED_DOC_TYPES = {
         "icon": "🏦",
         "desc": "Zestawienie aktywów i pasywów na dzień bilansowy",
         "keywords": ["aktywa trwałe", "aktywa obrotowe", "pasywa", "kapitał własny", "zobowiązania"],
+        "required": True,
     },
     "RZiS": {
         "label": "Rachunek Zysków i Strat",
         "icon": "📈",
         "desc": "Przychody, koszty i wynik finansowy za rok obrotowy",
         "keywords": ["przychody ze sprzedaży", "koszty działalności", "zysk netto", "wynik finansowy", "amortyzacja"],
+        "required": True,
     },
     "ŚRODKI TRWAŁE": {
         "label": "Tabela środków trwałych",
         "icon": "🏗️",
         "desc": "Wartość brutto, umorzenia i wartość netto środków trwałych",
         "keywords": ["środki trwałe", "wartość brutto", "umorzenie", "odpisy amortyzacyjne"],
+        "required": True,
     },
     "PRZEPŁYWY PIENIĘŻNE": {
         "label": "Rachunek przepływów pieniężnych",
         "icon": "💸",
         "desc": "Cash flow: operacyjny, inwestycyjny, finansowy",
         "keywords": ["przepływy", "działalność operacyjna", "działalność inwestycyjna"],
+        "required": False,
     },
     "POLITYKA RACHUNKOWOŚCI": {
         "label": "Polityka rachunkowości",
@@ -325,12 +364,14 @@ REQUIRED_DOC_TYPES = {
         "desc": "Przyjęte zasady rachunkowości, metody wyceny, okresy amortyzacji",
         "keywords": ["polityka rachunkowości", "zasady rachunkowości", "metody wyceny",
                      "okres amortyzacji", "przyjęte zasady", "opis przyjętych"],
+        "required": False,
     },
     "NOTY OBJAŚNIAJĄCE": {
         "label": "Noty objaśniające",
         "icon": "📝",
         "desc": "Dodatkowe noty i objaśnienia do pozycji sprawozdania",
         "keywords": ["nota ", "objaśnienie", "dodatkowe informacje"],
+        "required": False,
     },
     "ZOiS": {
         "label": "Zestawienie Obrotów i Sald",
@@ -345,6 +386,24 @@ REQUIRED_DOC_TYPES = {
                      "zespół 5", "zespół 7",
                      "rozrachunki", "koszty według rodzajów",
                      "bo wn", "bo ma"],
+        "required": True,
+    },
+    "ANKIETA BILANSOWA": {
+        "label": "Ankieta bilansowa",
+        "icon": "📝",
+        "desc": "Odpowiedzi klienta dot. zobowiązań warunkowych, kontynuacji działalności, podziału wyniku itp.",
+        "keywords": ["ankieta bilansowa", "propozycja podziału zysku",
+                     "propozycja pokrycia straty", "zobowiązania warunkowe",
+                     "gwarancji i poręczeń", "kontynuować działalność",
+                     "postępowaniu egzekucyjnym", "transakcje ze stronami powiązanymi",
+                     "nakłady na niefinansowe aktywa trwałe",
+                     "zdarzenia istotnie wpływające",
+                     "należności wątpliwe", "odsetki zwłoki",
+                     "pożyczek i świadczeń o podobnym charakterze",
+                     "zabezpieczenia majątkowe",
+                     "organy nadzorujące i zarządzające",
+                     "prognoza rozwoju spółki", "sytuacja finansowa jest"],
+        "required": False,
     },
 }
 
@@ -360,9 +419,11 @@ def identify_document_type(text: str) -> str:
 
 
 def check_missing_documents(doc_mapping: dict) -> list[str]:
-    """Zwraca listę typów dokumentów których brakuje wśród wgranych plików."""
+    """Zwraca listę typów dokumentów których brakuje wśród wgranych plików.
+    Uwzględnia tylko dokumenty oznaczone jako required=True."""
     types_found = {d["type"] for d in doc_mapping.values()}
-    return [dt for dt in REQUIRED_DOC_TYPES if dt not in types_found]
+    return [dt for dt, info in REQUIRED_DOC_TYPES.items()
+            if info.get("required", True) and dt not in types_found]
 
 
 def map_documents(parsed_docs: dict) -> dict:
@@ -435,8 +496,10 @@ def validate_data_consistency(doc_mapping: dict) -> list:
     for doc_type, info in REQUIRED_DOC_TYPES.items():
         if doc_type in types_found:
             issues.append({"level": "OK", "msg": f"✅ Znaleziono: {info['icon']} {info['label']}"})
+        elif info.get("required", True):
+            issues.append({"level": "WARN", "msg": f"⚠️ Brak dokumentu: {info['icon']} {info['label']}"})
         else:
-            issues.append({"level": "WARN", "msg": f"⚠️ Brak dokumentu: {info['icon']} {info['label']}"}) 
+            issues.append({"level": "WARN", "msg": f"ℹ️ Opcjonalny, nie wgrano: {info['icon']} {info['label']}"}) 
 
     return issues
 
@@ -482,11 +545,32 @@ STRUKTURA DOKUMENTU (obowiązkowa):
    2.16 Zdarzenia po dniu bilansowym
    2.17 Inne istotne informacje
 
+ANKIETA BILANSOWA — ZASADY WYKORZYSTANIA:
+Jeśli dostarczono wypełnioną Ankietę Bilansową od klienta, OBOWIĄZKOWO uwzględnij odpowiedzi:
+- Kontynuacja działalności (pyt. 12) → sekcja 1.1 (oświadczenie o kontynuacji) oraz 2.17
+- Postępowania sądowe/egzekucyjne (pyt. 5) → sekcja 2.17, nota o rezerwach
+- Propozycja podziału zysku (pyt. 6) → sekcja 2.12 (wynik finansowy i jego podział)
+- Propozycja pokrycia straty (pyt. 7) → sekcja 2.12
+- Zobowiązania warunkowe i zabezpieczenia (pyt. 8) → osobna nota / sekcja 2.9
+- Gwarancje i poręczenia udzielone (pyt. 9) i otrzymane (pyt. 10) → sekcja 2.17
+- Należności wątpliwe (pyt. 11) → sekcja 2.6 (nota o odpisach aktualizujących)
+- Prognozy rozwoju (pyt. 13) → sekcja 2.17
+- Transakcje z powiązanymi (pyt. 14-15) → osobna nota / sekcja 2.17
+- Pożyczki dla organów (pyt. 16-17) → sekcja 2.15
+- Planowane nakłady inwestycyjne (pyt. 18) → sekcja 2.17
+- Odsetki od należności (pyt. 19) → wpływa na wycenę należności w sekcji 1.3
+- Zdarzenia po dniu bilansowym (pyt. 20) → sekcja 2.16
+
+Jeśli odpowiedź na pytanie z ankiety brzmi "Tak" — ROZWIŃ temat profesjonalnie.
+Jeśli odpowiedź brzmi "Nie" — krótko stwierdź brak wystąpienia danego zjawiska.
+W przypadku Q6/Q7 (podział zysku/pokrycie straty) — opisz wybraną propozycję.
+
 STYL I JĘZYK:
 - Profesjonalne słownictwo: "wartość netto aktywów", "odpisy amortyzacyjne", "kapitał własny"
 - Liczby w PLN z dokładnością do groszy lub w tysiącach PLN (konsekwentnie)
 - Tryb oznajmujący, strona bierna, czas przeszły dla zdarzeń roku
 - Odesłania do konkretnych not i pozycji bilansu
+- Tabele generuj w formacie MARKDOWN (| kolumna1 | kolumna2 |) — zostaną skonwertowane na tabele Word
 
 WAŻNE: Jeśli dane finansowe są dostępne w dokumentach – cytuj je dokładnie.
 Jeśli brakuje danych – zaznacz "[DANE DO UZUPEŁNIENIA]" i opisz co powinno się znaleźć.
@@ -658,9 +742,42 @@ opisując WSZYSTKIE metody wyceny aktywów i pasywów (punkty 1-9) w sposób pro
         polityka_blok,
         zagrozenie_blok,
         "=" * 60,
-        "WYCIĄGI Z DOKUMENTÓW FINANSOWYCH:",
     ]
+
+    # Ankieta bilansowa — wyodrębnij i podaj z wyróżnieniem
+    ankieta_found = False
     for filename, doc_data in doc_mapping.items():
+        if doc_data["type"] == "ANKIETA BILANSOWA":
+            ankieta_found = True
+            context_parts.append("\n📋 ANKIETA BILANSOWA OD KLIENTA (odpowiedzi na pytania):")
+            context_parts.append("=" * 40)
+            context_parts.append(doc_data["text"][:12000])  # Ankieta jest krótka — dajemy więcej
+            context_parts.append("=" * 40)
+            context_parts.append(
+                "INSTRUKCJA: Powyższa ankieta zawiera odpowiedzi klienta. "
+                "Na ich podstawie OBOWIĄZKOWO uwzględnij w Informacji Dodatkowej: "
+                "kontynuację działalności, podział wyniku, zobowiązania warunkowe, "
+                "gwarancje/poręczenia, należności wątpliwe, transakcje z powiązanymi, "
+                "pożyczki dla organów, planowane nakłady, zdarzenia po dniu bilansowym. "
+                "Przy odpowiedzi 'Tak' — ROZWIŃ profesjonalnie. "
+                "Przy odpowiedzi 'Nie' — krótko stwierdź brak wystąpienia."
+            )
+            break
+
+    if not ankieta_found:
+        context_parts.append(
+            "\n⚠️ BRAK ANKIETY BILANSOWEJ: Nie dostarczono ankiety bilansowej od klienta. "
+            "W sekcjach 2.12 (podział wyniku), 2.16 (zdarzenia po dniu bilansowym), "
+            "2.17 (zobowiązania warunkowe, gwarancje, transakcje z powiązanymi) "
+            "wpisz [DANE DO UZUPEŁNIENIA — wymagana ankieta bilansowa od klienta]."
+        )
+
+    context_parts.append("\n" + "=" * 60)
+    context_parts.append("WYCIĄGI Z DOKUMENTÓW FINANSOWYCH:")
+
+    for filename, doc_data in doc_mapping.items():
+        if doc_data["type"] == "ANKIETA BILANSOWA":
+            continue  # Już dodana wyżej z wyróżnieniem
         context_parts.append(f"\n[{doc_data['type']}] {filename}:")
         # Ogranicz do 8000 znaków na dokument
         context_parts.append(doc_data["text"][:8000])
@@ -1028,6 +1145,7 @@ with st.sidebar:
     - 📜 Polityka rachunkowości
     - 📝 Noty objaśniające
     - ⚖️ Zestawienie Obrotów i Sald (ZOiS)
+    - 📋 Ankieta bilansowa (wypełniona przez klienta)
     """)
 
 
@@ -1035,20 +1153,21 @@ with st.sidebar:
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.markdown('<div class="step-card"><b>📁 Krok 1:</b> Wgraj dokumenty PDF sprawozdania</div>',
+    st.markdown('<div class="step-card"><b>📁 Krok 1:</b> Wgraj dokumenty sprawozdania (PDF / DOCX)</div>',
                 unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
-        "Wybierz pliki PDF",
-        type=["pdf"],
+        "Wybierz pliki PDF lub DOCX",
+        type=["pdf", "docx"],
         accept_multiple_files=True,
-        help="Wgraj 3-6 dokumentów: bilans, RZiS, noty, przepływy pieniężne"
+        help="Wgraj dokumenty: bilans, RZiS, noty, ZOiS, tabela ŚT, ankieta bilansowa (PDF lub DOCX)"
     )
 
     if uploaded_files:
         st.success(f"✅ Wgrano {len(uploaded_files)} plik(ów)")
         for f in uploaded_files:
             size_kb = len(f.getvalue()) // 1024
-            st.caption(f"📄 {f.name} ({size_kb} KB)")
+            ext = "DOCX" if f.name.lower().endswith(".docx") else "PDF"
+            st.caption(f"📄 {f.name} ({size_kb} KB, {ext})")
 
 with col2:
     st.markdown('<div class="step-card"><b>🔍 Krok 2:</b> Walidacja i mapowanie dokumentów</div>',
