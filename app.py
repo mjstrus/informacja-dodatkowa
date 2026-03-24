@@ -708,6 +708,67 @@ def add_horizontal_rule(doc: Document):
     pPr.append(pBdr)
 
 
+def add_markdown_table_to_doc(doc: Document, table_lines: list):
+    """Konwertuje linie markdown table (|...|) na sformatowaną tabelę Word."""
+    # Filtruj linie separatora (|---|---|...)
+    data_lines = [l for l in table_lines if not re.match(r"^\|[\s\-:|]+$", l)]
+    if not data_lines:
+        return
+
+    # Parsuj komórki
+    rows = []
+    for line in data_lines:
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        rows.append(cells)
+
+    if not rows:
+        return
+
+    num_cols = max(len(r) for r in rows)
+    # Wyrównaj liczbę kolumn
+    for r in rows:
+        while len(r) < num_cols:
+            r.append("")
+
+    table = doc.add_table(rows=len(rows), cols=num_cols)
+    try:
+        table.style = "Light Grid Accent 1"
+    except KeyError:
+        try:
+            table.style = "Table Grid"
+        except KeyError:
+            pass  # Domyślny styl
+    table.autofit = True
+
+    for i, row_data in enumerate(rows):
+        row = table.rows[i]
+        for j, cell_text in enumerate(row_data):
+            cell = row.cells[j]
+            cell.text = ""
+            p = cell.paragraphs[0]
+            # Obsługa **bold** w komórkach
+            parts = re.split(r"(\*\*[^*]+\*\*)", cell_text)
+            for part in parts:
+                if part.startswith("**") and part.endswith("**"):
+                    run = p.add_run(part[2:-2])
+                    run.bold = True
+                    run.font.size = Pt(9)
+                    run.font.name = "Calibri"
+                else:
+                    run = p.add_run(part)
+                    run.font.size = Pt(9)
+                    run.font.name = "Calibri"
+
+            # Nagłówek (pierwszy wiersz) — pogrubiony
+            if i == 0:
+                for run in p.runs:
+                    run.bold = True
+                    run.font.size = Pt(9)
+
+    # Dodaj pusty akapit po tabeli
+    doc.add_paragraph()
+
+
 def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
     """
     Konwertuje wygenerowaną treść AI na sformatowany plik .docx.
@@ -745,8 +806,21 @@ def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
 
     # Parsowanie i formatowanie treści
     lines = generated_text.split("\n")
-    for line in lines:
-        line = line.strip()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Wykryj tabelę markdown (linia zaczyna się od |)
+        if line.startswith("|") and "|" in line[1:]:
+            table_lines = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+            add_markdown_table_to_doc(doc, table_lines)
+            continue
+
+        i += 1
+
         if not line:
             doc.add_paragraph()
             continue
