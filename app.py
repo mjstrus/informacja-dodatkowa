@@ -820,7 +820,9 @@ def format_notes_for_prompt(selected_notes: list) -> str:
 
     lines = [
         "\n📋 NOTY OBJAŚNIAJĄCE DO WYGENEROWANIA:",
-        f"Na podstawie wgranych dokumentów i ankiety bilansowej wybrano {len(selected_notes)} not.\n",
+        f"Na podstawie wgranych dokumentów i ankiety bilansowej wybrano {len(selected_notes)} not.",
+        "WAŻNE: Numeruj noty SEKWENCYJNIE (Nota 1, Nota 2, Nota 3...) w kolejności poniższej listy.",
+        "Numery w nawiasach [GOFIN XX] służą tylko do identyfikacji wzoru — NIE umieszczaj ich w dokumencie.\n",
         "OBLIGATORYJNE (generuj ZAWSZE z danymi):"
     ]
 
@@ -829,18 +831,18 @@ def format_notes_for_prompt(selected_notes: list) -> str:
     prio2 = [n for n in selected_notes if n["priority"] == 2]
     prio3 = [n for n in selected_notes if n["priority"] == 3]
 
-    for n in prio1:
-        lines.append(f"  ✅ Nota {n['nr']}: {n['name']} [{n['reason']}]")
+    for idx, n in enumerate(prio1, 1):
+        lines.append(f"  ✅ {n['name']} [GOFIN {n['nr']}] — {n['reason']}")
 
     if prio2:
         lines.append("\nWAŻNE (generuj jeśli dane wystarczające):")
         for n in prio2:
-            lines.append(f"  📌 Nota {n['nr']}: {n['name']} [{n['reason']}]")
+            lines.append(f"  📌 {n['name']} [GOFIN {n['nr']}] — {n['reason']}")
 
     if prio3:
         lines.append("\nOPCJONALNE (generuj jeśli dane dostępne, pomiń jeśli brak):")
         for n in prio3:
-            lines.append(f"  📎 Nota {n['nr']}: {n['name']} [{n['reason']}]")
+            lines.append(f"  📎 {n['name']} [GOFIN {n['nr']}] — {n['reason']}")
 
     lines.append(
         "\nINSTRUKCJA: Wygeneruj KAŻDĄ notę z powyższej listy w formie tabeli markdown. "
@@ -849,7 +851,7 @@ def format_notes_for_prompt(selected_notes: list) -> str:
         "Noty, których NIE MA na liście — NIE generuj.\n"
         "WAŻNE: Jeśli dla danej noty WSZYSTKIE wartości liczbowe wynoszą 0 (zero), "
         "NIE generuj tabeli — zamiast tego napisz krótko: "
-        "\"Nota X — [tytuł noty]: Nie dotyczy (wartości zerowe w okresie sprawozdawczym).\"\n"
+        "\"Nota [numer sekwencyjny] — [tytuł noty]: Nie dotyczy.\"\n"
     )
 
     return "\n".join(lines)
@@ -936,6 +938,7 @@ STYL I JĘZYK:
 - Odesłania do konkretnych not i pozycji bilansu
 - Tabele generuj w formacie MARKDOWN (| kolumna1 | kolumna2 |) — zostaną skonwertowane na tabele Word
 - ZASADA ZEROWYCH WARTOŚCI: Jeśli dla danej noty objaśniającej WSZYSTKIE wartości liczbowe wynoszą 0 (zero), NIE generuj tabeli. Zamiast tego napisz: "Nota X — [tytuł]: Nie dotyczy." Dotyczy to zarówno tabel, jak i opisów liczbowych.
+- NUMERACJA NOT: Noty objaśniające numeruj SEKWENCYJNIE (Nota 1, Nota 2, Nota 3...) w kolejności ich występowania w dokumencie. NIE używaj numerów katalogowych GOFIN (np. Nota 17, Nota 35). Każda nota w wygenerowanym dokumencie dostaje kolejny numer od 1.
 
 WAŻNE: Jeśli dane finansowe są dostępne w dokumentach – cytuj je dokładnie.
 Jeśli brakuje danych – zaznacz "[DANE DO UZUPEŁNIENIA]" i opisz co powinno się znaleźć.
