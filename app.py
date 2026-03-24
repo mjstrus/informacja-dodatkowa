@@ -505,6 +505,374 @@ def validate_data_consistency(doc_mapping: dict) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# MODUŁ 3B: DOBÓR NOT OBJAŚNIAJĄCYCH
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Reguły doboru not: każda nota ma warunki generowania
+# "source": wymagane typy dokumentów (OR - wystarczy jeden)
+# "trigger": funkcja sprawdzająca czy nota ma być generowana
+# "category": "auto" | "ankieta" | "warunkowe" | "specjalne"
+# "priority": 1=rdzeń, 2=ważne, 3=opcjonalne
+
+NOTA_RULES = {
+    1:  {"name": "Zmiana wartości początkowej i umorzenia ŚT",
+         "source": ["ŚRODKI TRWAŁE", "ZOiS"], "category": "auto", "priority": 1},
+    2:  {"name": "Zmiana wartości początkowej i umorzenia WNiP",
+         "source": ["ŚRODKI TRWAŁE", "ZOiS"], "category": "auto", "priority": 1},
+    3:  {"name": "Zmiana wartości inwestycji długoterminowych",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 2,
+         "zois_keywords": ["inwestycje długoterminowe", "03"]},
+    4:  {"name": "Odpisy aktualizujące wartość długoterminowych aktywów niefinansowych",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 3,
+         "zois_keywords": ["odpis", "aktualizuj"]},
+    5:  {"name": "Odpisy aktualizujące wartość długoterminowych aktywów finansowych",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 3,
+         "zois_keywords": ["odpis", "aktyw", "finansow"]},
+    6:  {"name": "Koszty zakończonych prac rozwojowych oraz wartość firmy",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 2,
+         "zois_keywords": ["prace rozwojowe", "wartość firmy", "011"]},
+    7:  {"name": "Grunty użytkowane wieczyście",
+         "source": [], "category": "warunkowe", "priority": 3},
+    8:  {"name": "Środki trwałe nieamortyzowane (pozabilansowe)",
+         "source": [], "category": "warunkowe", "priority": 3},
+    9:  {"name": "Papiery wartościowe lub prawa",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 3,
+         "zois_keywords": ["papiery wartościowe", "03"]},
+    10: {"name": "Odpisy aktualizujące wartość należności",
+         "source": ["ZOiS"], "category": "auto", "priority": 1,
+         "zois_keywords": ["290", "odpis", "należności"]},
+    11: {"name": "Struktura własności kapitału podstawowego (S.A.)",
+         "source": [], "category": "warunkowe", "priority": 2,
+         "forma_prawna": ["SPÓŁKA AKCYJNA", "PROSTA SPÓŁKA AKCYJNA"]},
+    12: {"name": "Struktura własności kapitału podstawowego (sp. z o.o.)",
+         "source": [], "category": "auto", "priority": 1,
+         "forma_prawna": ["SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ"]},
+    13: {"name": "Zmiany stanów kapitałów zapasowego i rezerwowego",
+         "source": ["ZOiS", "BILANS"], "category": "auto", "priority": 1},
+    14: {"name": "Zmiany w stanie kapitału z aktualizacji wyceny",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 2,
+         "zois_keywords": ["803", "aktualizacja wyceny"]},
+    15: {"name": "Propozycja podziału zysku za rok obrotowy",
+         "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 1,
+         "ankieta_trigger": "q6_zysk"},
+    16: {"name": "Propozycja pokrycia straty za rok obrotowy",
+         "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 1,
+         "ankieta_trigger": "q7_strata"},
+    17: {"name": "Rezerwy na koszty i zobowiązania",
+         "source": ["ZOiS", "BILANS"], "category": "auto", "priority": 1},
+    18: {"name": "Odroczony podatek dochodowy",
+         "source": ["ZOiS"], "category": "auto", "priority": 1,
+         "zois_keywords": ["650", "841", "odroczony"]},
+    19: {"name": "Zobowiązania według okresów wymagalności",
+         "source": ["ZOiS", "BILANS"], "category": "auto", "priority": 1},
+    20: {"name": "Wykaz zobowiązań zabezpieczonych na majątku",
+         "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 2,
+         "ankieta_trigger": "q8_zobowiazania_warunkowe"},
+    21: {"name": "Czynne rozliczenia międzyokresowe",
+         "source": ["ZOiS"], "category": "auto", "priority": 1,
+         "zois_keywords": ["640", "rozliczenia międzyokresowe"]},
+    22: {"name": "Rozliczenia międzyokresowe przychodów",
+         "source": ["ZOiS"], "category": "auto", "priority": 1,
+         "zois_keywords": ["840", "845", "rozliczenia międzyokresowe przychod"]},
+    23: {"name": "Składniki aktywów w więcej niż jednej pozycji bilansu",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 3},
+    24: {"name": "Składniki pasywów w więcej niż jednej pozycji bilansu",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 3},
+    25: {"name": "Wykaz zobowiązań warunkowych",
+         "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 2,
+         "ankieta_trigger": "q8_zobowiazania_warunkowe"},
+    26: {"name": "Wykaz zobowiązań warunkowych zabezpieczonych na majątku",
+         "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 3,
+         "ankieta_trigger": "q8_zobowiazania_warunkowe"},
+    29: {"name": "Struktura rzeczowa i terytorialna przychodów",
+         "source": ["RZiS", "ZOiS"], "category": "auto", "priority": 1},
+    31: {"name": "Koszty rodzajowe (wariant kalkulacyjny)",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 2},
+    32: {"name": "Odpisy aktualizujące wartość środków trwałych",
+         "source": ["ŚRODKI TRWAŁE"], "category": "warunkowe", "priority": 2},
+    33: {"name": "Odpisy aktualizujące wartość zapasów",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 2,
+         "zois_keywords": ["340", "odpis", "zapas"]},
+    35: {"name": "Rozliczenie różnicy CIT vs wynik finansowy",
+         "source": ["RZiS", "ZOiS"], "category": "auto", "priority": 1},
+    36: {"name": "Koszt wytworzenia środków trwałych w budowie",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 2,
+         "zois_keywords": ["080", "środki trwałe w budowie"]},
+    38: {"name": "Nakłady na niefinansowe aktywa trwałe",
+         "source": ["ANKIETA BILANSOWA", "ZOiS"], "category": "ankieta", "priority": 2,
+         "ankieta_trigger": "q18_naklady"},
+    40: {"name": "Kursy walut przyjęte do wyceny",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 2,
+         "zois_keywords": ["walut", "kursow", "EUR", "USD", "GBP"]},
+    41: {"name": "Struktura środków pieniężnych",
+         "source": ["PRZEPŁYWY PIENIĘŻNE", "ZOiS"], "category": "auto", "priority": 1},
+    42: {"name": "Przepływy pieniężne netto — metoda pośrednia",
+         "source": ["PRZEPŁYWY PIENIĘŻNE"], "category": "auto", "priority": 2},
+    43: {"name": "Przeciętne zatrudnienie w podziale na grupy zawodowe",
+         "source": [], "category": "warunkowe", "priority": 2},
+    44: {"name": "Wynagrodzenia organów spółki",
+         "source": [], "category": "warunkowe", "priority": 2},
+    46: {"name": "Zaliczki, kredyty, pożyczki dla organów",
+         "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 2,
+         "ankieta_trigger": "q16_pozyczki"},
+    47: {"name": "Wynagrodzenie firmy audytorskiej",
+         "source": [], "category": "warunkowe", "priority": 2},
+    48: {"name": "Błędy lat ubiegłych odnoszone na kapitał",
+         "source": [], "category": "warunkowe", "priority": 3},
+    49: {"name": "Skutki zmian polityki rachunkowości",
+         "source": [], "category": "warunkowe", "priority": 3},
+    57: {"name": "Różnica zobowiązań krótkoterminowych (bilans vs przepływy)",
+         "source": ["BILANS", "PRZEPŁYWY PIENIĘŻNE"], "category": "auto", "priority": 2},
+    58: {"name": "Różnica zapasów (bilans vs przepływy)",
+         "source": ["BILANS", "PRZEPŁYWY PIENIĘŻNE"], "category": "auto", "priority": 2},
+    59: {"name": "Ustalenie faktycznie zapłaconego podatku dochodowego",
+         "source": ["ZOiS", "RZiS"], "category": "auto", "priority": 2},
+    60: {"name": "Struktura należności",
+         "source": ["ZOiS"], "category": "auto", "priority": 1},
+    61: {"name": "Należności według okresów wymagalności",
+         "source": ["ZOiS"], "category": "auto", "priority": 1},
+    63: {"name": "Środki pieniężne na rachunku VAT",
+         "source": ["ZOiS"], "category": "warunkowe", "priority": 2,
+         "zois_keywords": ["VAT", "rachunek VAT"]},
+    68: {"name": "Udziały (akcje) własne",
+         "source": [], "category": "warunkowe", "priority": 3},
+    72: {"name": "Gwarancje i poręczenia dla organów",
+         "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 2,
+         "ankieta_trigger": "q9_gwarancje"},
+    73: {"name": "Zobowiązania długoterminowe > 5 lat",
+         "source": ["ZOiS", "BILANS"], "category": "warunkowe", "priority": 2},
+    74: {"name": "Informacja o dochodach z tytułu ukrytych zysków",
+         "source": [], "category": "warunkowe", "priority": 3},
+    76: {"name": "Informacje o transakcjach z jednostkami powiązanymi",
+         "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 2,
+         "ankieta_trigger": "q14_powiazane"},
+}
+
+# Mapowanie triggerów ankiety na słowa kluczowe w tekście ankiety
+ANKIETA_TRIGGERS = {
+    "q6_zysk": {
+        "positive": ["przeznaczenie zysku", "wypłata dywidendy", "kapitał zapasowy",
+                      "podwyższenie kapitału"],
+        "negative": [],
+    },
+    "q7_strata": {
+        "positive": ["pokrycie straty", "zyskiem z lat", "kapitale zapasowym",
+                      "dopłat wniesionych"],
+        "negative": [],
+    },
+    "q8_zobowiazania_warunkowe": {
+        "question": "zobowiązania warunkowe",
+        "positive_answer": "tak",
+    },
+    "q9_gwarancje": {
+        "question": "gwarancji i poręczeń",
+        "positive_answer": "tak",
+    },
+    "q14_powiazane": {
+        "question": "transakcje ze stronami powiązanymi",
+        "positive_answer": "tak",
+    },
+    "q16_pozyczki": {
+        "question": "pożyczek i świadczeń o podobnym charakterze",
+        "positive_answer": "tak",
+    },
+    "q18_naklady": {
+        "question": "nakłady na niefinansowe aktywa trwałe",
+        "positive_answer": "planowane",
+    },
+}
+
+
+def _check_ankieta_trigger(trigger_key: str, ankieta_text: str) -> bool:
+    """Sprawdza czy ankieta bilansowa triggeruje daną notę."""
+    if not ankieta_text:
+        return False
+
+    trigger = ANKIETA_TRIGGERS.get(trigger_key, {})
+    text_lower = ankieta_text.lower()
+
+    # Dla pytań Tak/Nie — szukamy pytania i odpowiedzi tuż po nim
+    if "question" in trigger:
+        q_pos = text_lower.find(trigger["question"])
+        if q_pos == -1:
+            return False
+        # Sprawdź fragment tekstu po pytaniu (następne 100 znaków)
+        answer_region = text_lower[q_pos:q_pos + 100]
+        pos_answer = trigger["positive_answer"]
+        pos_pos = answer_region.find(pos_answer)
+
+        if pos_pos == -1:
+            return False
+
+        # Jeśli "nie" pojawia się PRZED pozytywną odpowiedzią jako samodzielne słowo — to negacja
+        # Uwaga: "nie" jako część innego słowa (np. "niefinansowe") nie liczy się
+        import re as _re
+        # Szukaj samodzielnego "nie" (z granicami słów) przed pozytywną odpowiedzią
+        nie_matches = list(_re.finditer(r'\bnie\b', answer_region))
+        if nie_matches:
+            earliest_nie = nie_matches[0].start()
+            if earliest_nie < pos_pos:
+                # Samodzielne "nie" jest przed pozytywną odpowiedzią — to negacja
+                return False
+
+        return True
+
+    # Dla pytań z wieloma opcjami (Q6, Q7) — wystarczy że któraś opcja jest zaznaczona
+    if "positive" in trigger:
+        return any(kw in text_lower for kw in trigger["positive"])
+
+    return False
+
+
+def _check_forma_prawna(nota_rule: dict, company_info: dict) -> bool:
+    """Sprawdza czy forma prawna pasuje do noty."""
+    if "forma_prawna" not in nota_rule:
+        return True  # Brak ograniczenia
+    forma = (company_info.get("forma_prawna", "") or "").upper()
+    return any(fp.upper() in forma for fp in nota_rule["forma_prawna"])
+
+
+def select_applicable_notes(doc_mapping: dict, company_info: dict = None) -> list:
+    """
+    Na podstawie wgranych dokumentów i ankiety bilansowej
+    dobiera listę not objaśniających do wygenerowania.
+
+    Zwraca listę: [{"nr": 1, "name": "...", "category": "auto", "reason": "..."}]
+    """
+    info = company_info or {}
+    types_found = {d["type"] for d in doc_mapping.values()}
+
+    # Wyciągnij tekst ankiety bilansowej (jeśli wgrana)
+    ankieta_text = ""
+    for doc_data in doc_mapping.values():
+        if doc_data["type"] == "ANKIETA BILANSOWA":
+            ankieta_text = doc_data["text"]
+            break
+
+    # Wyciągnij cały tekst ZOiS (do sprawdzania słów kluczowych)
+    zois_text = ""
+    for doc_data in doc_mapping.values():
+        if doc_data["type"] == "ZOiS":
+            zois_text = doc_data["text"].lower()
+            break
+
+    selected = []
+
+    for nota_nr, rule in sorted(NOTA_RULES.items()):
+        reason = ""
+        include = False
+
+        # 1. Sprawdź formę prawną (jeśli nota jest ograniczona do SA/sp.z o.o.)
+        if not _check_forma_prawna(rule, info):
+            continue
+
+        # 2. Kategoria "auto" — generuj jeśli mamy wymagane dokumenty
+        if rule["category"] == "auto":
+            sources = rule.get("source", [])
+            matched_sources = [s for s in sources if s in types_found]
+            if matched_sources:
+                include = True
+                reason = f"Źródło: {', '.join(matched_sources)}"
+            elif not sources:
+                # Brak wymaganych źródeł = zawsze generuj
+                include = True
+                reason = "Nota standardowa"
+
+        # 3. Kategoria "ankieta" — generuj jeśli ankieta triggeruje
+        elif rule["category"] == "ankieta":
+            trigger_key = rule.get("ankieta_trigger", "")
+            if ankieta_text and _check_ankieta_trigger(trigger_key, ankieta_text):
+                include = True
+                reason = "Trigger z ankiety bilansowej"
+            elif not ankieta_text and rule["priority"] <= 1:
+                # Brak ankiety — przy priorytetowych notach zaznacz jako "do uzupełnienia"
+                include = True
+                reason = "Brak ankiety — wymagane dane od klienta"
+
+        # 4. Kategoria "warunkowe" — generuj jeśli mamy źródło + ewentualnie słowa kluczowe w ZOiS
+        elif rule["category"] == "warunkowe":
+            sources = rule.get("source", [])
+            matched_sources = [s for s in sources if s in types_found]
+            if matched_sources:
+                # Jeśli nota ma słowa kluczowe ZOiS — sprawdź czy występują
+                zois_kw = rule.get("zois_keywords", [])
+                if zois_kw and zois_text:
+                    if any(kw.lower() in zois_text for kw in zois_kw):
+                        include = True
+                        reason = f"Wykryto dane w ZOiS ({', '.join(matched_sources)})"
+                elif not zois_kw:
+                    # Warunkowe bez zois_keywords — generuj tylko jeśli
+                    # źródło to NIE sam ZOiS (np. ŚRODKI TRWAŁE)
+                    non_zois_sources = [s for s in matched_sources if s != "ZOiS"]
+                    if non_zois_sources:
+                        include = True
+                        reason = f"Źródło dostępne: {', '.join(non_zois_sources)}"
+
+        if include:
+            selected.append({
+                "nr": nota_nr,
+                "name": rule["name"],
+                "category": rule["category"],
+                "priority": rule["priority"],
+                "reason": reason,
+            })
+
+    return selected
+
+
+def format_notes_for_prompt(selected_notes: list) -> str:
+    """Formatuje listę wybranych not do wstawienia w prompt Claude."""
+    if not selected_notes:
+        return "\nNie wybrano żadnych not objaśniających do wygenerowania.\n"
+
+    lines = [
+        "\n📋 NOTY OBJAŚNIAJĄCE DO WYGENEROWANIA:",
+        f"Na podstawie wgranych dokumentów i ankiety bilansowej wybrano {len(selected_notes)} not.\n",
+        "OBLIGATORYJNE (generuj ZAWSZE z danymi):"
+    ]
+
+    # Podziel na priorytetowe i opcjonalne
+    prio1 = [n for n in selected_notes if n["priority"] == 1]
+    prio2 = [n for n in selected_notes if n["priority"] == 2]
+    prio3 = [n for n in selected_notes if n["priority"] == 3]
+
+    for n in prio1:
+        lines.append(f"  ✅ Nota {n['nr']}: {n['name']} [{n['reason']}]")
+
+    if prio2:
+        lines.append("\nWAŻNE (generuj jeśli dane wystarczające):")
+        for n in prio2:
+            lines.append(f"  📌 Nota {n['nr']}: {n['name']} [{n['reason']}]")
+
+    if prio3:
+        lines.append("\nOPCJONALNE (generuj jeśli dane dostępne, pomiń jeśli brak):")
+        for n in prio3:
+            lines.append(f"  📎 Nota {n['nr']}: {n['name']} [{n['reason']}]")
+
+    lines.append(
+        "\nINSTRUKCJA: Wygeneruj KAŻDĄ notę z powyższej listy w formie tabeli markdown. "
+        "Noty obligatoryjne MUSZĄ być wypełnione danymi z dokumentów. "
+        "Jeśli brakuje danych dla noty — wstaw [DANE DO UZUPEŁNIENIA]. "
+        "Noty, których NIE MA na liście — NIE generuj.\n"
+    )
+
+    return "\n".join(lines)
+
+
+def format_notes_for_display(selected_notes: list) -> list:
+    """Formatuje listę not do wyświetlenia w UI Streamlit."""
+    display = []
+    for n in selected_notes:
+        icon = {"auto": "🔄", "ankieta": "📋", "warunkowe": "❓"}.get(n["category"], "📝")
+        prio = {"1": "🔴", "2": "🟡", "3": "⚪"}.get(str(n["priority"]), "")
+        display.append({
+            "level": "OK",
+            "msg": f"{prio} {icon} Nota {n['nr']}: {n['name']} — {n['reason']}"
+        })
+    return display
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MODUŁ 4: GENEROWANIE INFORMACJI DODATKOWEJ PRZEZ CLAUDE
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -773,6 +1141,13 @@ opisując WSZYSTKIE metody wyceny aktywów i pasywów (punkty 1-9) w sposób pro
         )
 
     context_parts.append("\n" + "=" * 60)
+
+    # Dodaj listę wybranych not objaśniających
+    selected_notes = info.get("selected_notes", [])
+    if selected_notes:
+        context_parts.append(format_notes_for_prompt(selected_notes))
+
+    context_parts.append("=" * 60)
     context_parts.append("WYCIĄGI Z DOKUMENTÓW FINANSOWYCH:")
 
     for filename, doc_data in doc_mapping.items():
@@ -1204,7 +1579,7 @@ if st.session_state.get("run_generation") and anthropic_key and uploaded_files a
     try:
         # ── KROK 1: Parsowanie (tylko raz, wynik w session_state) ────────
         if "parsed_docs" not in st.session_state:
-            status_text.info("📄 Krok 1/4: Parsowanie dokumentów PDF...")
+            status_text.info("📄 Krok 1/5: Parsowanie dokumentów PDF...")
             progress_bar.progress(10)
 
             def update_progress(val, msg):
@@ -1223,7 +1598,7 @@ if st.session_state.get("run_generation") and anthropic_key and uploaded_files a
 
         # ── KROK 2: Mapowanie (tylko raz) ────────────────────────────────
         if "doc_mapping" not in st.session_state:
-            status_text.info("🗂️ Krok 2/4: Mapowanie i identyfikacja dokumentów...")
+            status_text.info("🗂️ Krok 2/5: Mapowanie i identyfikacja dokumentów...")
             doc_mapping = map_documents(parsed)
             st.session_state["doc_mapping"] = doc_mapping
 
@@ -1431,7 +1806,7 @@ if st.session_state.get("run_generation") and anthropic_key and uploaded_files a
         polityka_answers = st.session_state.get("polityka_answers", {})
 
         # ── KROK 3: Walidacja ───────────────────────────────────────────────
-        status_text.info("✅ Krok 3/4: Walidacja spójności danych...")
+        status_text.info("✅ Krok 3/5: Walidacja spójności danych...")
         progress_bar.progress(55)
         validation_issues = validate_data_consistency(doc_mapping)
 
@@ -1453,8 +1828,26 @@ if st.session_state.get("run_generation") and anthropic_key and uploaded_files a
                 st.markdown(f'<span class="{css.get(issue["level"], "")}">{issue["msg"]}</span>',
                             unsafe_allow_html=True)
 
+        # ── KROK 3B: Dobór not objaśniających ────────────────────────────
+        status_text.info("📋 Krok 3b/5: Dobór not objaśniających...")
+        progress_bar.progress(58)
+
+        # Potrzebujemy company_info do sprawdzenia formy prawnej
+        _ci_for_notes = {"forma_prawna": company_forma}
+        selected_notes = select_applicable_notes(doc_mapping, _ci_for_notes)
+        st.session_state["selected_notes"] = selected_notes
+
+        with results_container:
+            st.subheader(f"📝 Dobrano {len(selected_notes)} not objaśniających")
+            notes_display = format_notes_for_display(selected_notes)
+            for item in notes_display:
+                st.markdown(f'<span class="validation-ok">{item["msg"]}</span>',
+                            unsafe_allow_html=True)
+            if not selected_notes:
+                st.warning("Nie dobrano żadnych not — sprawdź wgrane dokumenty.")
+
         # ── KROK 4: Generowanie ─────────────────────────────────────────────
-        status_text.info("🤖 Krok 4/4: Generowanie przez Claude 3.5 Sonnet (może potrwać 1-2 min)...")
+        status_text.info("🤖 Krok 4/5: Generowanie przez Claude 3.5 Sonnet (może potrwać 1-2 min)...")
         progress_bar.progress(65)
 
         company_info = {
@@ -1471,6 +1864,7 @@ if st.session_state.get("run_generation") and anthropic_key and uploaded_files a
             "zagrozenie_kontynuacji": zagrozenie_kontynuacji,
             "zagrozenie_opis": zagrozenie_opis,
             "polityka_answers": polityka_answers,
+            "selected_notes": selected_notes,
         }
         generated_text = generate_accounting_notes(
             doc_mapping=doc_mapping,
