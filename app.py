@@ -19,6 +19,10 @@ from docx.oxml import OxmlElement
 import base64
 import requests
 from datetime import date
+import matplotlib
+matplotlib.use("Agg")  # Backend bez GUI
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 
 # ─── PAGE CONFIG ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -942,7 +946,36 @@ STYL I JĘZYK:
 
 WAŻNE: Jeśli dane finansowe są dostępne w dokumentach – cytuj je dokładnie.
 Jeśli brakuje danych – zaznacz "[DANE DO UZUPEŁNIENIA]" i opisz co powinno się znaleźć.
-Jeśli dostarczono dokument Polityki Rachunkowości – sekcja 1.2–1.5 musi być oparta WYŁĄCZNIE na jego treści."""
+Jeśli dostarczono dokument Polityki Rachunkowości – sekcja 1.2–1.5 musi być oparta WYŁĄCZNIE na jego treści.
+
+DANE DO WYKRESÓW (OBOWIĄZKOWE):
+Na samym końcu dokumentu, PO całej treści Informacji Dodatkowej, dodaj blok danych w formacie JSON otoczony znacznikami <!--CHART_DATA_START--> i <!--CHART_DATA_END-->.
+Blok ten NIE będzie widoczny w dokumencie Word — służy wyłącznie do automatycznego generowania wykresów.
+Wypełnij TYLKO te pola, dla których masz KONKRETNE dane liczbowe z dokumentów. Pomiń pola bez danych.
+
+Format:
+<!--CHART_DATA_START-->
+{
+  "aktywa_trwale": 0,
+  "aktywa_obrotowe": 0,
+  "kapital_wlasny": 0,
+  "zobowiazania_dlugoterminowe": 0,
+  "zobowiazania_krotkoterminowe": 0,
+  "przychody_ze_sprzedazy": 0,
+  "koszty_dzialalnosci": 0,
+  "wynik_finansowy_netto": 0,
+  "amortyzacja": 0,
+  "srodki_trwale_brutto": 0,
+  "srodki_trwale_umorzenie": 0,
+  "srodki_trwale_netto": 0,
+  "naleznosci_krotkoterminowe": 0,
+  "srodki_pieniezne": 0,
+  "zapasy": 0,
+  "przychody_rok_poprzedni": 0,
+  "koszty_rok_poprzedni": 0,
+  "wynik_rok_poprzedni": 0
+}
+<!--CHART_DATA_END-->"""
 
 
 def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
@@ -1424,6 +1457,309 @@ def add_markdown_table_to_doc(doc: Document, table_lines: list):
     doc.add_paragraph()  # Odstęp po tabeli
 
 
+def _extract_chart_data(generated_text: str) -> dict:
+    """Wyciąga blok JSON z danymi do wykresów z odpowiedzi Claude."""
+    match = re.search(
+        r"<!--CHART_DATA_START-->\s*(\{.*?\})\s*<!--CHART_DATA_END-->",
+        generated_text, re.DOTALL
+    )
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _strip_chart_data(generated_text: str) -> str:
+    """Usuwa blok chart data z tekstu przed wyświetleniem/eksportem."""
+    return re.sub(
+        r"\s*<!--CHART_DATA_START-->.*?<!--CHART_DATA_END-->\s*",
+        "", generated_text, flags=re.DOTALL
+    ).strip()
+
+
+def _setup_chart_style():
+    """Konfiguruje styl wykresów — profesjonalny, spójny z dokumentem."""
+    plt.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Calibri", "DejaVu Sans", "Arial"],
+        "font.size": 9,
+        "axes.titlesize": 11,
+        "axes.titleweight": "bold",
+        "axes.labelsize": 9,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "figure.facecolor": "white",
+        "figure.dpi": 150,
+        "savefig.dpi": 150,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.2,
+    })
+
+
+# Paleta kolorów spójna z dokumentem
+_CHART_COLORS = ["#1B2A4A", "#2D6A9F", "#3A86C8", "#6BAED6", "#9ECAE1",
+                  "#C6DBEF", "#4A90D9", "#7FB3E0", "#A8D0E8", "#D1E8F5"]
+_CHART_ACCENT = "#E74C3C"  # Czerwony akcent (np. strata)
+
+
+def _fmt_pln(value: float) -> str:
+    """Formatuje kwotę PLN do czytelnego formatu."""
+    if abs(value) >= 1_000_000:
+        return f"{value/1_000_000:,.1f} mln"
+    elif abs(value) >= 1_000:
+        return f"{value/1_000:,.0f} tys."
+    return f"{value:,.0f}"
+
+
+def _generate_pie_chart(data: dict, keys: list, labels: list,
+                         title: str) -> bytes | None:
+    """Generuje wykres kołowy. Zwraca PNG jako bytes."""
+    values = [data.get(k, 0) for k in keys]
+    # Filtruj zera
+    filtered = [(l, v) for l, v in zip(labels, values) if v > 0]
+    if len(filtered) < 2:
+        return None
+
+    labels_f, values_f = zip(*filtered)
+
+    _setup_chart_style()
+    fig, ax = plt.subplots(figsize=(5, 3.5))
+
+    colors = _CHART_COLORS[:len(values_f)]
+    wedges, texts, autotexts = ax.pie(
+        values_f, labels=None, autopct="%1.1f%%",
+        colors=colors, startangle=90,
+        pctdistance=0.75, wedgeprops={"linewidth": 1, "edgecolor": "white"}
+    )
+    for at in autotexts:
+        at.set_fontsize(8)
+        at.set_color("white")
+        at.set_fontweight("bold")
+
+    # Legenda z kwotami
+    legend_labels = [f"{l} ({_fmt_pln(v)} PLN)" for l, v in zip(labels_f, values_f)]
+    ax.legend(wedges, legend_labels, loc="center left", bbox_to_anchor=(1, 0.5),
+              fontsize=8, frameon=False)
+
+    ax.set_title(title, pad=12, color="#1B2A4A")
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _generate_bar_comparison(data: dict, title: str) -> bytes | None:
+    """Generuje wykres słupkowy porównujący rok bieżący vs poprzedni."""
+    categories = ["Przychody", "Koszty", "Wynik netto"]
+    current = [
+        data.get("przychody_ze_sprzedazy", 0),
+        data.get("koszty_dzialalnosci", 0),
+        data.get("wynik_finansowy_netto", 0),
+    ]
+    previous = [
+        data.get("przychody_rok_poprzedni", 0),
+        data.get("koszty_rok_poprzedni", 0),
+        data.get("wynik_rok_poprzedni", 0),
+    ]
+
+    # Sprawdź czy mamy dane za oba lata
+    if sum(current) == 0:
+        return None
+
+    _setup_chart_style()
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+
+    x = range(len(categories))
+    width = 0.35
+
+    has_previous = sum(previous) != 0
+
+    if has_previous:
+        bars1 = ax.bar([i - width/2 for i in x], previous, width,
+                        label="Rok poprzedni", color="#9ECAE1", edgecolor="white")
+        bars2 = ax.bar([i + width/2 for i in x], current, width,
+                        label="Rok bieżący", color="#1B2A4A", edgecolor="white")
+    else:
+        colors = ["#2D6A9F", "#6BAED6",
+                  "#27AE60" if current[2] >= 0 else _CHART_ACCENT]
+        bars2 = ax.bar(x, current, width * 1.5, color=colors, edgecolor="white")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories)
+    ax.set_title(title, pad=12, color="#1B2A4A")
+
+    # Formatowanie osi Y
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(
+        lambda v, p: _fmt_pln(v)
+    ))
+
+    # Etykiety wartości nad słupkami
+    for bar in (bars2 if not has_previous else list(bars1) + list(bars2)):
+        h = bar.get_height()
+        if h != 0:
+            ax.text(bar.get_x() + bar.get_width()/2, h,
+                    _fmt_pln(h), ha="center", va="bottom", fontsize=7,
+                    color="#333333")
+
+    if has_previous:
+        ax.legend(fontsize=8, frameon=False)
+
+    ax.axhline(y=0, color="#CCCCCC", linewidth=0.5)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _generate_asset_structure_bar(data: dict) -> bytes | None:
+    """Generuje wykres struktury aktywów obrotowych."""
+    keys = ["naleznosci_krotkoterminowe", "zapasy", "srodki_pieniezne"]
+    labels = ["Należności", "Zapasy", "Środki pieniężne"]
+    values = [data.get(k, 0) for k in keys]
+
+    filtered = [(l, v) for l, v in zip(labels, values) if v > 0]
+    if len(filtered) < 2:
+        return None
+
+    labels_f, values_f = zip(*filtered)
+
+    _setup_chart_style()
+    fig, ax = plt.subplots(figsize=(5, 3))
+
+    colors = ["#2D6A9F", "#3A86C8", "#6BAED6"][:len(values_f)]
+    bars = ax.barh(labels_f, values_f, color=colors, edgecolor="white", height=0.5)
+
+    for bar, v in zip(bars, values_f):
+        ax.text(bar.get_width() + max(values_f) * 0.02, bar.get_y() + bar.get_height()/2,
+                f"{_fmt_pln(v)} PLN", va="center", fontsize=8, color="#333333")
+
+    ax.set_title("Struktura aktywów obrotowych", pad=12, color="#1B2A4A")
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda v, p: _fmt_pln(v)))
+    ax.invert_yaxis()
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def generate_charts(chart_data: dict, year: int) -> list:
+    """
+    Generuje wszystkie wykresy na podstawie danych.
+    Zwraca listę: [(tytuł, bytes_png), ...]
+    """
+    if not chart_data:
+        return []
+
+    charts = []
+
+    # 1. Struktura aktywów (pie)
+    png = _generate_pie_chart(
+        chart_data,
+        keys=["aktywa_trwale", "aktywa_obrotowe"],
+        labels=["Aktywa trwałe", "Aktywa obrotowe"],
+        title=f"Struktura aktywów — {year}"
+    )
+    if png:
+        charts.append(("Struktura aktywów", png))
+
+    # 2. Struktura pasywów (pie)
+    png = _generate_pie_chart(
+        chart_data,
+        keys=["kapital_wlasny", "zobowiazania_dlugoterminowe", "zobowiazania_krotkoterminowe"],
+        labels=["Kapitał własny", "Zobowiązania długoterminowe", "Zobowiązania krótkoterminowe"],
+        title=f"Struktura pasywów — {year}"
+    )
+    if png:
+        charts.append(("Struktura pasywów", png))
+
+    # 3. Przychody vs koszty vs wynik (bar)
+    png = _generate_bar_comparison(
+        chart_data,
+        title=f"Przychody, koszty i wynik finansowy — {year}"
+    )
+    if png:
+        charts.append(("Analiza wyniku finansowego", png))
+
+    # 4. Struktura aktywów obrotowych (horizontal bar)
+    png = _generate_asset_structure_bar(chart_data)
+    if png:
+        charts.append(("Struktura aktywów obrotowych", png))
+
+    # 5. Środki trwałe — brutto vs umorzenie vs netto (bar)
+    st_data = {
+        "brutto": chart_data.get("srodki_trwale_brutto", 0),
+        "umorzenie": chart_data.get("srodki_trwale_umorzenie", 0),
+        "netto": chart_data.get("srodki_trwale_netto", 0),
+    }
+    if st_data["brutto"] > 0:
+        _setup_chart_style()
+        fig, ax = plt.subplots(figsize=(5, 3))
+        cats = ["Wartość brutto", "Umorzenie", "Wartość netto"]
+        vals = [st_data["brutto"], st_data["umorzenie"], st_data["netto"]]
+        colors = ["#1B2A4A", "#E74C3C", "#27AE60"]
+        bars = ax.bar(cats, vals, color=colors, edgecolor="white", width=0.5)
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                    _fmt_pln(v), ha="center", va="bottom", fontsize=8)
+        ax.set_title(f"Środki trwałe — {year}", pad=12, color="#1B2A4A")
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, p: _fmt_pln(v)))
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        buf.seek(0)
+        charts.append(("Środki trwałe", buf.getvalue()))
+
+    return charts
+
+
+def _add_charts_section(doc, charts: list):
+    """Dodaje sekcję z wykresami do dokumentu Word."""
+    if not charts:
+        return
+
+    doc.add_page_break()
+    h = doc.add_heading("Analiza graficzna", level=1)
+
+    p_intro = doc.add_paragraph()
+    run = p_intro.add_run(
+        "Poniższe wykresy przedstawiają graficzną analizę kluczowych danych "
+        "finansowych na podstawie sprawozdania finansowego."
+    )
+    run.font.size = Pt(9)
+    run.font.color.rgb = _CLR_GRAY
+    run.font.italic = True
+
+    for i, (title, png_bytes) in enumerate(charts):
+        # Tytuł wykresu
+        p_title = doc.add_paragraph()
+        p_title.paragraph_format.space_before = Pt(12)
+        run = p_title.add_run(f"Wykres {i+1}. {title}")
+        run.bold = True
+        run.font.size = Pt(10)
+        run.font.color.rgb = _CLR_BLUE
+
+        # Wstaw obraz
+        p_img = doc.add_paragraph()
+        p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run_img = p_img.add_run()
+        run_img.add_picture(io.BytesIO(png_bytes), width=Inches(5.0))
+
+        # Separator między wykresami
+        if i < len(charts) - 1:
+            _add_separator(doc, "EEEEEE", 2)
+
+
 def _add_title_page(doc: Document, company_name: str, year: int, company_info: dict = None):
     """Tworzy profesjonalną stronę tytułową."""
     info = company_info or {}
@@ -1524,7 +1860,15 @@ def _add_rich_paragraph(doc: Document, line: str):
 
 def save_to_word(generated_text: str, company_name: str, year: int,
                  company_info: dict = None) -> bytes:
-    """Konwertuje wygenerowaną treść AI na profesjonalny plik .docx."""
+    """Konwertuje wygenerowaną treść AI na profesjonalny plik .docx z wykresami."""
+    doc = Document()
+
+    # Wyciągnij dane do wykresów i oczyść tekst
+    chart_data = _extract_chart_data(generated_text)
+    clean_text = _strip_chart_data(generated_text)
+
+    # Generuj wykresy
+    charts = generate_charts(chart_data, year)
     doc = Document()
 
     # Konfiguracja stylów
@@ -1547,7 +1891,7 @@ def save_to_word(generated_text: str, company_name: str, year: int,
     _add_title_page(doc, company_name, year, company_info)
 
     # Parsowanie i formatowanie treści
-    lines = generated_text.split("\n")
+    lines = clean_text.split("\n")
     i = 0
     while i < len(lines):
         line = lines[i].strip()
@@ -1588,6 +1932,9 @@ def save_to_word(generated_text: str, company_name: str, year: int,
             doc.add_paragraph(line, style="List Number")
         else:
             _add_rich_paragraph(doc, line)
+
+    # Sekcja wykresów (jeśli dane dostępne)
+    _add_charts_section(doc, charts)
 
     # Stopka dokumentu
     _add_separator(doc, "2D6A9F", 4)
@@ -2116,7 +2463,7 @@ if st.session_state.get("run_generation") and anthropic_key and uploaded_files a
             company_info=company_info,
             progress_callback=lambda v, m: progress_bar.progress(int(65 + v * 20))
         )
-        st.session_state["generated_text"] = generated_text
+        st.session_state["generated_text"] = _strip_chart_data(generated_text)
         progress_bar.progress(88)
 
         # ── KROK 5: Eksport do Word ─────────────────────────────────────────
@@ -2145,7 +2492,7 @@ if st.session_state.get("run_generation") and anthropic_key and uploaded_files a
                 )
 
             with st.expander("👁️ Podgląd wygenerowanej treści", expanded=True):
-                st.markdown(generated_text)
+                st.markdown(_strip_chart_data(generated_text))
 
     except anthropic.AuthenticationError:
         st.session_state.pop("run_generation", None)
