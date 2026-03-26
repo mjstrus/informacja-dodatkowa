@@ -315,6 +315,48 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
                 if pkd:
                     break
 
+        # ── Wspólnicy (sp. z o.o.) — dzial1.wspolnicySpozoo ──────────────
+        wspolnicy = []
+        kapital_blok = dzial1.get("kapital", {})
+        kapital_podstawowy = ""
+        if kapital_blok:
+            kp = kapital_blok.get("wysokoscKapitaluZakladowego", {})
+            if isinstance(kp, dict):
+                kapital_podstawowy = kp.get("wartosc", "")
+            elif isinstance(kp, str):
+                kapital_podstawowy = kp
+
+        # Wspólnicy mogą być w dzial1.wspolnicySpozoo lub dane.dzial1.wspolnicy
+        wspolnicy_raw = (dzial1.get("wspolnicySpozoo", []) or
+                          dzial1.get("wspolnicy", []) or [])
+        if isinstance(wspolnicy_raw, list):
+            for w in wspolnicy_raw:
+                if isinstance(w, dict):
+                    nazwa_w = w.get("nazwa", "")
+                    # Osoba fizyczna
+                    if not nazwa_w:
+                        imie = w.get("imiona", {})
+                        if isinstance(imie, dict):
+                            imie = imie.get("imie", "")
+                        nazwisko = w.get("nazwisko", "")
+                        nazwa_w = f"{imie} {nazwisko}".strip()
+                    udzialy = w.get("posiadaneUdzialy", {})
+                    liczba = ""
+                    wartosc = ""
+                    if isinstance(udzialy, dict):
+                        liczba = udzialy.get("iloscUdzialow", "")
+                        wartosc_ud = udzialy.get("wartoscUdzialow", {})
+                        if isinstance(wartosc_ud, dict):
+                            wartosc = wartosc_ud.get("wartosc", "")
+                        elif isinstance(wartosc_ud, str):
+                            wartosc = wartosc_ud
+                    if nazwa_w:
+                        wspolnicy.append({
+                            "nazwa": nazwa_w,
+                            "liczba_udzialow": str(liczba),
+                            "wartosc_udzialow": str(wartosc),
+                        })
+
         return {
             "nazwa": nazwa,
             "siedziba": siedziba,
@@ -324,6 +366,8 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
             "pkd": pkd,
             "data_rejestracji": data_rej,
             "forma_prawna": forma,
+            "kapital_podstawowy": str(kapital_podstawowy),
+            "wspolnicy": wspolnicy,
         }
     except Exception as e:
         return None
@@ -619,11 +663,14 @@ NOTA_RULES = {
     49: {"name": "Skutki zmian polityki rachunkowości",
          "source": [], "category": "warunkowe", "priority": 3},
     57: {"name": "Różnica zobowiązań krótkoterminowych (bilans vs przepływy)",
-         "source": ["BILANS", "PRZEPŁYWY PIENIĘŻNE"], "category": "auto", "priority": 2},
+         "source": ["BILANS", "PRZEPŁYWY PIENIĘŻNE"], "category": "auto", "priority": 2,
+         "require_all_sources": True},
     58: {"name": "Różnica zapasów (bilans vs przepływy)",
-         "source": ["BILANS", "PRZEPŁYWY PIENIĘŻNE"], "category": "auto", "priority": 2},
+         "source": ["BILANS", "PRZEPŁYWY PIENIĘŻNE"], "category": "auto", "priority": 2,
+         "require_all_sources": True},
     59: {"name": "Ustalenie faktycznie zapłaconego podatku dochodowego",
-         "source": ["ZOiS", "RZiS"], "category": "auto", "priority": 2},
+         "source": ["ZOiS", "RZiS"], "category": "warunkowe", "priority": 2,
+         "zois_keywords": ["220", "podatek dochodowy", "CIT"]},
     60: {"name": "Struktura należności",
          "source": ["ZOiS"], "category": "auto", "priority": 1},
     61: {"name": "Należności według okresów wymagalności",
@@ -767,11 +814,16 @@ def select_applicable_notes(doc_mapping: dict, company_info: dict = None) -> lis
         if rule["category"] == "auto":
             sources = rule.get("source", [])
             matched_sources = [s for s in sources if s in types_found]
-            if matched_sources:
+
+            if rule.get("require_all_sources"):
+                # Wymagane WSZYSTKIE źródła
+                if len(matched_sources) == len(sources) and sources:
+                    include = True
+                    reason = f"Źródło: {', '.join(matched_sources)}"
+            elif matched_sources:
                 include = True
                 reason = f"Źródło: {', '.join(matched_sources)}"
             elif not sources:
-                # Brak wymaganych źródeł = zawsze generuj
                 include = True
                 reason = "Nota standardowa"
 
@@ -944,8 +996,16 @@ STYL I JĘZYK:
 - ZASADA ZEROWYCH WARTOŚCI: Jeśli dla danej noty objaśniającej WSZYSTKIE wartości liczbowe wynoszą 0 (zero), NIE generuj tabeli. Zamiast tego napisz: "Nota X — [tytuł]: Nie dotyczy." Dotyczy to zarówno tabel, jak i opisów liczbowych.
 - NUMERACJA NOT: Noty objaśniające numeruj SEKWENCYJNIE (Nota 1, Nota 2, Nota 3...) w kolejności ich występowania w dokumencie. NIE używaj numerów katalogowych GOFIN (np. Nota 17, Nota 35). Każda nota w wygenerowanym dokumencie dostaje kolejny numer od 1.
 
-WAŻNE: Jeśli dane finansowe są dostępne w dokumentach – cytuj je dokładnie.
-Jeśli brakuje danych – zaznacz "[DANE DO UZUPEŁNIENIA]" i opisz co powinno się znaleźć.
+WAŻNE — ZASADY WYPEŁNIANIA DANYCH:
+1. Jeśli dane liczbowe są dostępne w dokumentach — cytuj je dokładnie.
+2. Jeśli nota dotyczy zjawiska, które NIE WYSTĄPIŁO (np. brak odpisów, brak zobowiązań warunkowych,
+   ankieta bilansowa odpowiada "Nie") — napisz "Nie dotyczy." NIE twórz pustej tabeli z zerami.
+3. Jeśli masz kwotę łączną ale brak rozbicia na podkategorie (np. znasz łączne należności
+   ale nie masz wiekowania) — podaj kwotę łączną i napisz: "Szczegółowy podział wg terminów
+   wymagalności wymaga danych z analityki kont rozrachunkowych."
+4. Użyj "[DANE DO UZUPEŁNIENIA]" TYLKO gdy dane POWINNY istnieć ale nie zostały dostarczone
+   w żadnym dokumencie (np. liczba etatów, dane wspólników). Nigdy nie wstawiaj [DANE DO UZUPEŁNIENIA]
+   w tabelach liczbowych — zamiast tego napisz "Nie dotyczy" lub podaj dostępne dane łączne.
 Jeśli dostarczono dokument Polityki Rachunkowości – sekcja 1.2–1.5 musi być oparta WYŁĄCZNIE na jego treści.
 
 DANE DO WYKRESÓW (OBOWIĄZKOWE):
@@ -1140,10 +1200,43 @@ opisując WSZYSTKIE metody wyceny aktywów i pasywów (punkty 1-9) w sposób pro
         f"DATA REJESTRACJI W KRS: {info.get('data_rejestracji', '')}",
         f"OKRES SPRAWOZDAWCZY: od {info.get('okres_od', '')} do {info.get('okres_do', '')}",
         f"ROK OBROTOWY: {year}",
-        polityka_blok,
-        zagrozenie_blok,
-        "=" * 60,
     ]
+
+    # Dane wspólników z KRS
+    wspolnicy = info.get("wspolnicy", [])
+    kapital_podst = info.get("kapital_podstawowy", "")
+    if wspolnicy or kapital_podst:
+        context_parts.append("\n👥 STRUKTURA WŁASNOŚCI KAPITAŁU PODSTAWOWEGO (dane z KRS):")
+        if kapital_podst:
+            context_parts.append(f"Kapitał podstawowy: {kapital_podst} PLN")
+        for w in wspolnicy:
+            context_parts.append(
+                f"  - {w.get('nazwa', '?')}: {w.get('liczba_udzialow', '?')} udziałów, "
+                f"wartość {w.get('wartosc_udzialow', '?')} PLN"
+            )
+        context_parts.append(
+            "Użyj tych danych do wypełnienia noty o strukturze własności kapitału podstawowego."
+        )
+
+    # Zatrudnienie
+    zatrudnienie = info.get("zatrudnienie", "")
+    if zatrudnienie:
+        context_parts.append(f"\n👥 PRZECIĘTNE ZATRUDNIENIE: {zatrudnienie} etatów")
+    else:
+        context_parts.append(
+            "\n👥 PRZECIĘTNE ZATRUDNIENIE: [DANE DO UZUPEŁNIENIA — "
+            "użytkownik nie podał liczby etatów]"
+        )
+
+    # Wynagrodzenie audytora
+    wyn_audytor = info.get("wynagrodzenie_audytora", "")
+    if wyn_audytor:
+        context_parts.append(f"💰 WYNAGRODZENIE FIRMY AUDYTORSKIEJ: {wyn_audytor} PLN")
+
+    context_parts.append("")  # pusta linia
+    context_parts.append(polityka_blok)
+    context_parts.append(zagrozenie_blok)
+    context_parts.append("=" * 60)
 
     # Ankieta bilansowa — wyodrębnij i podaj z wyróżnieniem
     ankieta_found = False
@@ -2101,6 +2194,19 @@ with st.sidebar:
         zagrozenie_opis = ""
 
     st.divider()
+    st.subheader("👥 Dane dodatkowe")
+    zatrudnienie = st.text_input(
+        "Przeciętne zatrudnienie (etaty)",
+        placeholder="np. 5",
+        help="Średnia liczba etatów w roku obrotowym — wymagane do Informacji Dodatkowej"
+    )
+    wynagrodzenie_audytora = st.text_input(
+        "Wynagrodzenie firmy audytorskiej (PLN)",
+        placeholder="np. 5000 (zostaw puste jeśli nie dotyczy)",
+        help="Kwota za badanie sprawozdania — zostaw puste jeśli spółka nie podlega badaniu"
+    )
+
+    st.divider()
     st.markdown("""
     **📋 Obsługiwane dokumenty:**
     - 🏦 Bilans
@@ -2454,6 +2560,10 @@ if st.session_state.get("run_generation") and anthropic_key and uploaded_files a
             "zagrozenie_opis": zagrozenie_opis,
             "polityka_answers": polityka_answers,
             "selected_notes": selected_notes,
+            "zatrudnienie": zatrudnienie,
+            "wynagrodzenie_audytora": wynagrodzenie_audytora,
+            "kapital_podstawowy": krs.get("kapital_podstawowy", ""),
+            "wspolnicy": krs.get("wspolnicy", []),
         }
         generated_text = generate_accounting_notes(
             doc_mapping=doc_mapping,
