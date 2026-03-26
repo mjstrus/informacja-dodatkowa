@@ -903,11 +903,11 @@ def format_notes_for_prompt(selected_notes: list) -> str:
     lines.append(
         "\nINSTRUKCJA: Wygeneruj KAŻDĄ notę z powyższej listy w formie tabeli markdown. "
         "Noty obligatoryjne MUSZĄ być wypełnione danymi z dokumentów. "
-        "Jeśli brakuje danych dla noty — wstaw [DANE DO UZUPEŁNIENIA]. "
+        "Jeśli brakuje danych — napisz 'Nie dotyczy.' lub użyj myślnika '—' w komórkach tabeli. "
+        "NIGDY nie pisz '[DANE DO UZUPEŁNIENIA]'. "
         "Noty, których NIE MA na liście — NIE generuj.\n"
-        "WAŻNE: Jeśli dla danej noty WSZYSTKIE wartości liczbowe wynoszą 0 (zero), "
-        "NIE generuj tabeli — zamiast tego napisz krótko: "
-        "\"Nota [numer sekwencyjny] — [tytuł noty]: Nie dotyczy.\"\n"
+        "Jeśli dla danej noty WSZYSTKIE wartości liczbowe wynoszą 0 (zero), "
+        "NIE generuj tabeli — napisz: 'Nie dotyczy.'\n"
     )
 
     return "\n".join(lines)
@@ -996,16 +996,38 @@ STYL I JĘZYK:
 - ZASADA ZEROWYCH WARTOŚCI: Jeśli dla danej noty objaśniającej WSZYSTKIE wartości liczbowe wynoszą 0 (zero), NIE generuj tabeli. Zamiast tego napisz: "Nota X — [tytuł]: Nie dotyczy." Dotyczy to zarówno tabel, jak i opisów liczbowych.
 - NUMERACJA NOT: Noty objaśniające numeruj SEKWENCYJNIE (Nota 1, Nota 2, Nota 3...) w kolejności ich występowania w dokumencie. NIE używaj numerów katalogowych GOFIN (np. Nota 17, Nota 35). Każda nota w wygenerowanym dokumencie dostaje kolejny numer od 1.
 
-WAŻNE — ZASADY WYPEŁNIANIA DANYCH:
-1. Jeśli dane liczbowe są dostępne w dokumentach — cytuj je dokładnie.
-2. Jeśli nota dotyczy zjawiska, które NIE WYSTĄPIŁO (np. brak odpisów, brak zobowiązań warunkowych,
-   ankieta bilansowa odpowiada "Nie") — napisz "Nie dotyczy." NIE twórz pustej tabeli z zerami.
-3. Jeśli masz kwotę łączną ale brak rozbicia na podkategorie (np. znasz łączne należności
-   ale nie masz wiekowania) — podaj kwotę łączną i napisz: "Szczegółowy podział wg terminów
-   wymagalności wymaga danych z analityki kont rozrachunkowych."
-4. Użyj "[DANE DO UZUPEŁNIENIA]" TYLKO gdy dane POWINNY istnieć ale nie zostały dostarczone
-   w żadnym dokumencie (np. liczba etatów, dane wspólników). Nigdy nie wstawiaj [DANE DO UZUPEŁNIENIA]
-   w tabelach liczbowych — zamiast tego napisz "Nie dotyczy" lub podaj dostępne dane łączne.
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  KRYTYCZNA ZASADA — BEZWZGLĘDNY ZAKAZ UŻYWANIA "[DANE DO UZUPEŁNIENIA]"    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+NIGDY, pod żadnym pozorem, nie wstawiaj tekstu "[DANE DO UZUPEŁNIENIA]" w dokumencie.
+To wyrażenie jest ZAKAZANE. Każde jego wystąpienie to BŁĄD.
+
+Zamiast "[DANE DO UZUPEŁNIENIA]" ZAWSZE stosuj jedną z poniższych strategii:
+
+A) ZJAWISKO NIE WYSTĄPIŁO (brak odpisów, brak zobowiązań warunkowych, brak rezerw,
+   brak zmian kapitału, ankieta odpowiada "Nie", wartości = 0):
+   → Napisz: "Nie dotyczy."
+   → NIE twórz tabeli. Jedna linia tekstu wystarczy.
+
+B) MASZ KWOTĘ ŁĄCZNĄ ALE BRAK ROZBICIA (np. znasz łączne należności ale nie masz
+   podziału na terminy przeterminowania):
+   → Podaj kwotę łączną w tabeli.
+   → Puste komórki rozbicia wypełnij myślnikiem "—" (NIE "[DANE DO UZUPEŁNIENIA]").
+   → Pod tabelą dodaj: "Szczegółowa analiza wiekowania wymaga danych z analityki."
+
+C) BRAK DANYCH W DOKUMENTACH ALE ZJAWISKO MOŻE ISTNIEĆ (np. struktura wspólników
+   gdy nie podano z KRS, zatrudnienie gdy nie podano liczby):
+   → Jeśli możesz oszacować na podstawie innych danych — oszacuj i zaznacz źródło.
+   → Jeśli nie możesz — napisz np.: "Na dzień sporządzenia sprawozdania Spółka
+     nie przedłożyła szczegółowych danych dotyczących [temat]."
+
+D) NOTA Z SAMYMI ZERAMI:
+   → Napisz: "Nie dotyczy."
+   → NIE generuj tabeli z zerami.
+
+POWTARZAM: Wyrażenie "[DANE DO UZUPEŁNIENIA]" jest ZAKAZANE w całym dokumencie.
+
 Jeśli dostarczono dokument Polityki Rachunkowości – sekcja 1.2–1.5 musi być oparta WYŁĄCZNIE na jego treści.
 
 DANE DO WYKRESÓW (OBOWIĄZKOWE):
@@ -1224,8 +1246,8 @@ opisując WSZYSTKIE metody wyceny aktywów i pasywów (punkty 1-9) w sposób pro
         context_parts.append(f"\n👥 PRZECIĘTNE ZATRUDNIENIE: {zatrudnienie} etatów")
     else:
         context_parts.append(
-            "\n👥 PRZECIĘTNE ZATRUDNIENIE: [DANE DO UZUPEŁNIENIA — "
-            "użytkownik nie podał liczby etatów]"
+            "\n👥 PRZECIĘTNE ZATRUDNIENIE: Użytkownik nie podał liczby etatów. "
+            "Napisz: 'Średnie zatrudnienie w przeliczeniu na pełne etaty wynosiło — etatów.'"
         )
 
     # Wynagrodzenie audytora
@@ -1261,9 +1283,9 @@ opisując WSZYSTKIE metody wyceny aktywów i pasywów (punkty 1-9) w sposób pro
     if not ankieta_found:
         context_parts.append(
             "\n⚠️ BRAK ANKIETY BILANSOWEJ: Nie dostarczono ankiety bilansowej od klienta. "
-            "W sekcjach 2.12 (podział wyniku), 2.16 (zdarzenia po dniu bilansowym), "
-            "2.17 (zobowiązania warunkowe, gwarancje, transakcje z powiązanymi) "
-            "wpisz [DANE DO UZUPEŁNIENIA — wymagana ankieta bilansowa od klienta]."
+            "W sekcjach dotyczących podziału wyniku, zdarzeń po dniu bilansowym, "
+            "zobowiązań warunkowych i transakcji z powiązanymi — napisz: "
+            "'Na dzień sporządzenia sprawozdania Spółka nie przedłożyła danych w tym zakresie.'"
         )
 
     context_parts.append("\n" + "=" * 60)
@@ -1292,7 +1314,8 @@ opisując WSZYSTKIE metody wyceny aktywów i pasywów (punkty 1-9) w sposób pro
 {full_context}
 
 Wygeneruj pełną Informację Dodatkową zgodnie z polską Ustawą o Rachunkowości.
-Gdzie masz dane – użyj konkretnych liczb. Gdzie brakuje – napisz [DANE DO UZUPEŁNIENIA].
+Gdzie masz dane – użyj konkretnych liczb. Gdzie brakuje – napisz "Nie dotyczy." lub użyj myślnika "—".
+NIGDY nie pisz "[DANE DO UZUPEŁNIENIA]".
 Formatuj wyraźnie nagłówkami i akapitami."""
 
     if progress_callback:
