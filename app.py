@@ -336,7 +336,7 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
         wspolnicy_raw = None
         for dzial_key in ["dzial1", "dzial2", "dzial3"]:
             dzial = dane.get(dzial_key, {})
-            for wspol_key in ["wspolnicySpozoo", "wspolnicy",
+            for wspol_key in ["wspolnicySpzoo", "wspolnicySpozoo", "wspolnicy",
                                "informacjaOWspolnikach", "wspólnicy"]:
                 candidate = dzial.get(wspol_key)
                 if candidate and isinstance(candidate, list) and len(candidate) > 0:
