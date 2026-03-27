@@ -241,6 +241,12 @@ def fetch_krs_by_krs_nr_debug(krs_nr: str) -> tuple:
                 parsed = _parse_odpis(data, krs_clean)
                 if parsed:
                     log.append("\n✅ Dane sparsowane pomyślnie")
+                    log.append(f"   Wspólnicy znalezieni: {len(parsed.get('wspolnicy', []))}")
+                    log.append(f"   Kapitał: {parsed.get('kapital_podstawowy', 'brak')}")
+                    log.append(f"   Debug klucze: {parsed.get('_debug_krs_keys', [])}")
+                    # Pokaż surowe klucze dzial1
+                    dzial1_keys = list(data.get("odpis", data).get("dane", {}).get("dzial1", {}).keys())
+                    log.append(f"   Klucze dzial1: {dzial1_keys}")
                     return parsed, "\n".join(log)
             else:
                 log.append(f"  Błąd: {r.text[:200]}")
@@ -315,7 +321,7 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
                 if pkd:
                     break
 
-        # ── Wspólnicy (sp. z o.o.) — dzial1.wspolnicySpozoo ──────────────
+        # ── Wspólnicy (sp. z o.o.) — szukaj w wielu lokalizacjach ─────────
         wspolnicy = []
         kapital_blok = dzial1.get("kapital", {})
         kapital_podstawowy = ""
@@ -323,39 +329,83 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
             kp = kapital_blok.get("wysokoscKapitaluZakladowego", {})
             if isinstance(kp, dict):
                 kapital_podstawowy = kp.get("wartosc", "")
-            elif isinstance(kp, str):
-                kapital_podstawowy = kp
+            elif isinstance(kp, (str, int, float)):
+                kapital_podstawowy = str(kp)
 
-        # Wspólnicy mogą być w dzial1.wspolnicySpozoo lub dane.dzial1.wspolnicy
-        wspolnicy_raw = (dzial1.get("wspolnicySpozoo", []) or
-                          dzial1.get("wspolnicy", []) or [])
-        if isinstance(wspolnicy_raw, list):
+        # Szukaj wspólników w wielu możliwych lokalizacjach
+        wspolnicy_raw = None
+        for dzial_key in ["dzial1", "dzial2", "dzial3"]:
+            dzial = dane.get(dzial_key, {})
+            for wspol_key in ["wspolnicySpozoo", "wspolnicy",
+                               "informacjaOWspolnikach", "wspólnicy"]:
+                candidate = dzial.get(wspol_key)
+                if candidate and isinstance(candidate, list) and len(candidate) > 0:
+                    wspolnicy_raw = candidate
+                    break
+                # Czasem wspólnicy są zagnieżdżeni głębiej
+                if isinstance(candidate, dict):
+                    for sub_key in ["wspolnik", "listaWspolnikow", "dane"]:
+                        sub = candidate.get(sub_key)
+                        if isinstance(sub, list) and len(sub) > 0:
+                            wspolnicy_raw = sub
+                            break
+            if wspolnicy_raw:
+                break
+
+        def _parse_wspolnik(w: dict) -> dict | None:
+            """Parsuje pojedynczego wspólnika z różnych formatów API KRS."""
+            if not isinstance(w, dict):
+                return None
+            # Nazwa — osoba prawna
+            nazwa_w = w.get("nazwa", "")
+            # Osoba fizyczna — różne formaty
+            if not nazwa_w:
+                # Format 1: imiona.imie + nazwisko
+                imie = w.get("imiona", "")
+                if isinstance(imie, dict):
+                    imie = imie.get("imie", "")
+                elif isinstance(imie, list) and imie:
+                    imie = imie[0] if isinstance(imie[0], str) else imie[0].get("imie", "")
+                # Format 2: imie + nazwisko (bezpośrednio)
+                if not imie:
+                    imie = w.get("imie", "")
+                nazwisko = w.get("nazwisko", "")
+                nazwa_w = f"{imie} {nazwisko}".strip()
+
+            if not nazwa_w:
+                return None
+
+            # Udziały — różne formaty
+            udzialy = w.get("posiadaneUdzialy", w.get("udzialy", {}))
+            liczba = ""
+            wartosc = ""
+            if isinstance(udzialy, dict):
+                liczba = udzialy.get("iloscUdzialow", udzialy.get("liczba", ""))
+                wartosc_ud = udzialy.get("wartoscUdzialow",
+                              udzialy.get("wartosc", ""))
+                if isinstance(wartosc_ud, dict):
+                    wartosc = wartosc_ud.get("wartosc", "")
+                elif isinstance(wartosc_ud, (str, int, float)):
+                    wartosc = str(wartosc_ud)
+            return {
+                "nazwa": nazwa_w,
+                "liczba_udzialow": str(liczba),
+                "wartosc_udzialow": str(wartosc),
+            }
+
+        if wspolnicy_raw and isinstance(wspolnicy_raw, list):
             for w in wspolnicy_raw:
-                if isinstance(w, dict):
-                    nazwa_w = w.get("nazwa", "")
-                    # Osoba fizyczna
-                    if not nazwa_w:
-                        imie = w.get("imiona", {})
-                        if isinstance(imie, dict):
-                            imie = imie.get("imie", "")
-                        nazwisko = w.get("nazwisko", "")
-                        nazwa_w = f"{imie} {nazwisko}".strip()
-                    udzialy = w.get("posiadaneUdzialy", {})
-                    liczba = ""
-                    wartosc = ""
-                    if isinstance(udzialy, dict):
-                        liczba = udzialy.get("iloscUdzialow", "")
-                        wartosc_ud = udzialy.get("wartoscUdzialow", {})
-                        if isinstance(wartosc_ud, dict):
-                            wartosc = wartosc_ud.get("wartosc", "")
-                        elif isinstance(wartosc_ud, str):
-                            wartosc = wartosc_ud
-                    if nazwa_w:
-                        wspolnicy.append({
-                            "nazwa": nazwa_w,
-                            "liczba_udzialow": str(liczba),
-                            "wartosc_udzialow": str(wartosc),
-                        })
+                parsed = _parse_wspolnik(w)
+                if parsed:
+                    wspolnicy.append(parsed)
+
+        # Debug: zachowaj surowe klucze do diagnostyki
+        _debug_keys = []
+        for dk in ["dzial1", "dzial2", "dzial3"]:
+            d = dane.get(dk, {})
+            for k in d.keys():
+                if "wspol" in k.lower() or "kapital" in k.lower():
+                    _debug_keys.append(f"{dk}.{k}")
 
         return {
             "nazwa": nazwa,
@@ -368,6 +418,7 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
             "forma_prawna": forma,
             "kapital_podstawowy": str(kapital_podstawowy),
             "wspolnicy": wspolnicy,
+            "_debug_krs_keys": _debug_keys,
         }
     except Exception as e:
         return None
@@ -2154,7 +2205,14 @@ with st.sidebar:
                         krs_data = fetch_krs_by_krs_nr(krs_input)
                     if krs_data:
                         st.session_state["krs_data"] = krs_data
-                        st.success("✅ Dane pobrane z KRS!")
+                        n_wsp = len(krs_data.get("wspolnicy", []))
+                        kap = krs_data.get("kapital_podstawowy", "")
+                        msg = "✅ Dane pobrane z KRS!"
+                        if n_wsp:
+                            msg += f" Znaleziono {n_wsp} wspólników."
+                        if kap:
+                            msg += f" Kapitał: {kap} PLN."
+                        st.success(msg)
                     else:
                         st.error("❌ Nie znaleziono. Sprawdź numer KRS lub uzupełnij ręcznie.")
                 except ConnectionError:
@@ -2192,6 +2250,28 @@ with st.sidebar:
     company_forma = st.text_input("Forma prawna",
                                    value=krs.get("forma_prawna", ""),
                                    placeholder="np. SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ")
+
+    # Wyświetl wspólników i kapitał z KRS
+    krs_wspolnicy = krs.get("wspolnicy", [])
+    krs_kapital = krs.get("kapital_podstawowy", "")
+    if krs_kapital or krs_wspolnicy:
+        st.divider()
+        st.subheader("👥 Dane wspólników (z KRS)")
+        if krs_kapital:
+            st.markdown(f"**Kapitał podstawowy:** {krs_kapital} PLN")
+        if krs_wspolnicy:
+            for w in krs_wspolnicy:
+                st.markdown(
+                    f"- **{w['nazwa']}** — {w['liczba_udzialow']} udziałów, "
+                    f"wartość {w['wartosc_udzialow']} PLN"
+                )
+        else:
+            st.warning("⚠️ API KRS nie zwróciło danych wspólników. "
+                       "Dane zostaną pominięte w Informacji Dodatkowej.")
+        # Debug info
+        debug_keys = krs.get("_debug_krs_keys", [])
+        if debug_keys:
+            st.caption(f"🔍 Klucze KRS ze wspólnikami/kapitałem: {', '.join(debug_keys)}")
 
     st.divider()
     st.subheader("📅 Okres sprawozdawczy")
