@@ -561,6 +561,9 @@ Na podstawie powyższych odpowiedzi wypełnij DOKŁADNIE sekcje 1.2–1.5 Inform
         f"GŁÓWNY PKD: {info.get('pkd', '')}",
         f"DATA REJESTRACJI W KRS: {info.get('data_rejestracji', '')}",
         f"OKRES SPRAWOZDAWCZY: od {info.get('okres_od', '')} do {info.get('okres_do', '')}",
+        f"ZATRUDNIENIE ŚREDNIE ROK BIEŻĄCY: {info.get('zatrudnienie_biezacy', 0)} etatów",
+        f"ZATRUDNIENIE ŚREDNIE ROK POPRZEDNI: {info.get('zatrudnienie_poprzedni', 0)} etatów",
+        f"UWAGI DO ZATRUDNIENIA: {info.get('zatrudnienie_uwagi', '')}",
         f"ROK OBROTOWY: {year}",
         polityka_blok,
         zagrozenie_blok,
@@ -858,6 +861,23 @@ with st.sidebar:
         zagrozenie_opis = ""
 
     st.divider()
+    st.subheader("👥 Zatrudnienie")
+    zatrudnienie_biezacy = st.number_input(
+        f"Średnie zatrudnienie — rok bieżący (etaty)",
+        min_value=0, value=0, step=1,
+        help="Średnia liczba pracowników w etatach przeliczeniowych w roku obrotowym"
+    )
+    zatrudnienie_poprzedni = st.number_input(
+        f"Średnie zatrudnienie — rok poprzedni (etaty)",
+        min_value=0, value=0, step=1,
+        help="Średnia liczba pracowników w etatach przeliczeniowych w roku poprzednim"
+    )
+    zatrudnienie_uwagi = st.text_input(
+        "Uwagi do zatrudnienia (opcjonalnie)",
+        placeholder="np. w tym 2 osoby na umowie zlecenie"
+    )
+
+    st.divider()
     st.markdown("""
     **📋 Obsługiwane dokumenty:**
     - 🏦 Bilans
@@ -1130,6 +1150,9 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
             "zagrozenie_kontynuacji": zagrozenie_kontynuacji,
             "zagrozenie_opis": zagrozenie_opis,
             "polityka_answers": polityka_answers,
+            "zatrudnienie_biezacy": zatrudnienie_biezacy,
+            "zatrudnienie_poprzedni": zatrudnienie_poprzedni,
+            "zatrudnienie_uwagi": zatrudnienie_uwagi,
         }
         generated_text = generate_accounting_notes(
             doc_mapping=doc_mapping,
