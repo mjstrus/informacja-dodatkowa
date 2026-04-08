@@ -1256,6 +1256,7 @@ with st.sidebar:
                         krs_data = fetch_krs_by_krs_nr(krs_input)
                     if krs_data:
                         st.session_state["krs_data"] = krs_data
+                        st.session_state.pop("wspolnicy_edit", None)  # Reset edytowanych wspólników
                         st.success("✅ Dane pobrane z KRS!")
                     else:
                         st.error("❌ Nie znaleziono. Sprawdź numer KRS lub uzupełnij ręcznie.")
@@ -1295,32 +1296,63 @@ with st.sidebar:
                                    value=krs.get("forma_prawna", ""),
                                    placeholder="np. SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ")
 
-    # Wyświetl wspólników z KRS
+    # Wspólnicy — edytowalne pola, auto-wypełniane z KRS
+    st.divider()
+    st.subheader("👥 Wspólnicy / Udziałowcy")
+    st.caption("ℹ️ Dane pobrane z KRS mogą być ocenzurowane (RODO). Uzupełnij pełne dane ręcznie.")
+
     krs_wspolnicy = krs.get("wspolnicy", [])
     krs_kapital = krs.get("kapital_podstawowy", "")
-    if krs_kapital or krs_wspolnicy:
-        st.divider()
-        st.subheader("👥 Dane wspólników (z KRS)")
-        if krs_kapital:
-            st.markdown(f"**Kapitał podstawowy:** {krs_kapital} PLN")
-        if krs_wspolnicy:
-            for w in krs_wspolnicy:
-                l = w['liczba_udzialow']
-                v = w['wartosc_udzialow']
-                name = w['nazwa']
-                if l in ("komandytariusz", "komplementariusz"):
-                    line = f"- **{name}** ({l})"
-                    if v:
-                        line += f" — wkład {v}"
-                    st.markdown(line)
-                elif l and v:
-                    st.markdown(f"- **{name}** — {l} udziałów, wartość {v} PLN")
-                elif v:
-                    st.markdown(f"- **{name}** — wartość {v}")
-                else:
-                    st.markdown(f"- **{name}**")
-        else:
-            st.warning("⚠️ API KRS nie zwróciło danych wspólników.")
+
+    kapital_podstawowy = st.text_input(
+        "Kapitał podstawowy (PLN)",
+        value=krs_kapital,
+        placeholder="np. 5 000,00"
+    )
+
+    # Inicjalizuj listę wspólników z KRS (jeśli jeszcze nie edytowano)
+    if "wspolnicy_edit" not in st.session_state and krs_wspolnicy:
+        st.session_state["wspolnicy_edit"] = [
+            {"nazwa": w["nazwa"], "rola": w["liczba_udzialow"], "wartosc": w["wartosc_udzialow"]}
+            for w in krs_wspolnicy
+        ]
+
+    n_wspolnikow = st.number_input(
+        "Liczba wspólników",
+        min_value=0, max_value=20,
+        value=len(st.session_state.get("wspolnicy_edit", krs_wspolnicy)),
+        step=1
+    )
+
+    wspolnicy_edit = []
+    for i in range(int(n_wspolnikow)):
+        # Domyślne wartości z KRS lub puste
+        defaults = {}
+        if "wspolnicy_edit" in st.session_state and i < len(st.session_state["wspolnicy_edit"]):
+            defaults = st.session_state["wspolnicy_edit"][i]
+        elif i < len(krs_wspolnicy):
+            w = krs_wspolnicy[i]
+            defaults = {"nazwa": w["nazwa"], "rola": w["liczba_udzialow"], "wartosc": w["wartosc_udzialow"]}
+
+        cols = st.columns([3, 2, 2])
+        with cols[0]:
+            nazwa = st.text_input(f"Wspólnik {i+1} — imię i nazwisko / nazwa",
+                                   value=defaults.get("nazwa", ""),
+                                   key=f"wsp_nazwa_{i}")
+        with cols[1]:
+            rola = st.text_input(f"Rola / udziały",
+                                  value=defaults.get("rola", ""),
+                                  key=f"wsp_rola_{i}",
+                                  placeholder="np. 100 udziałów / komandytariusz")
+        with cols[2]:
+            wartosc = st.text_input(f"Wartość wkładu / udziałów",
+                                     value=defaults.get("wartosc", ""),
+                                     key=f"wsp_wartosc_{i}",
+                                     placeholder="np. 5 000 PLN")
+        if nazwa:
+            wspolnicy_edit.append({"nazwa": nazwa, "rola": rola, "wartosc": wartosc})
+
+    st.session_state["wspolnicy_edit"] = wspolnicy_edit
 
     st.divider()
     st.subheader("📅 Okres sprawozdawczy")
@@ -1688,8 +1720,11 @@ if st.session_state.get("run_generation") and uploaded_files:
             "zatrudnienie_uwagi": zatrudnienie_uwagi,
             "selected_notes": selected_notes,
             "wynagrodzenie_audytora": wynagrodzenie_audytora,
-            "kapital_podstawowy": krs.get("kapital_podstawowy", ""),
-            "wspolnicy": krs.get("wspolnicy", []),
+            "kapital_podstawowy": kapital_podstawowy,
+            "wspolnicy": [
+                {"nazwa": w["nazwa"], "liczba_udzialow": w["rola"], "wartosc_udzialow": w["wartosc"]}
+                for w in wspolnicy_edit
+            ],
         }
         generated_text = generate_accounting_notes(
             doc_mapping=doc_mapping,
