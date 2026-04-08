@@ -774,7 +774,11 @@ WYMAGANIA PRAWNE (Ustawa o Rachunkowości):
 
 STRUKTURA DOKUMENTU (obowiązkowa):
 1. WPROWADZENIE DO SPRAWOZDANIA FINANSOWEGO
-   1.1 Dane identyfikacyjne jednostki
+   1.1 Dane identyfikacyjne jednostki (nazwa, forma prawna, siedziba, NIP, KRS, REGON, PKD,
+       data rejestracji, okres sprawozdawczy, oświadczenie o kontynuacji działalności,
+       STRUKTURA WŁASNOŚCI KAPITAŁU — lista wspólników/udziałowców z KRS z podaniem
+       imienia i nazwiska, roli (komplementariusz/komandytariusz) lub liczby udziałów,
+       wartości wkładu/udziałów. Dane wspólników znajdziesz w sekcji "STRUKTURA WŁASNOŚCI KAPITAŁU")
    1.2 Zasady (polityka) rachunkowości
    1.3 Metody wyceny aktywów i pasywów
    1.4 Metody amortyzacji i stosowane stawki
@@ -864,7 +868,7 @@ Na podstawie powyższych wypełnij sekcje 1.2–1.5.""".format(
     wspolnicy = info.get("wspolnicy", [])
     kapital_podst = info.get("kapital_podstawowy", "")
     if wspolnicy or kapital_podst:
-        context_parts.append("\n👥 STRUKTURA WŁASNOŚCI KAPITAŁU (z KRS):")
+        context_parts.append("\n👥 STRUKTURA WŁASNOŚCI KAPITAŁU (z KRS) — WSTAW DO SEKCJI 1.1:")
         if kapital_podst:
             context_parts.append(f"Kapitał podstawowy: {kapital_podst} PLN")
         for w in wspolnicy:
@@ -878,6 +882,10 @@ Na podstawie powyższych wypełnij sekcje 1.2–1.5.""".format(
                 context_parts.append(line)
             else:
                 context_parts.append(f"  - {n}: {l} udziałów, wartość {v} PLN")
+        context_parts.append(
+            "INSTRUKCJA: Powyższe dane wspólników OBOWIĄZKOWO umieść w sekcji 1.1 "
+            "Dane identyfikacyjne jednostki, w formie tabeli lub listy."
+        )
 
     # Wynagrodzenie audytora
     wyn_aud = info.get("wynagrodzenie_audytora", "")
