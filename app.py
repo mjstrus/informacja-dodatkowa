@@ -439,6 +439,7 @@ REQUIRED_DOC_TYPES = {
         "icon": "💸",
         "desc": "Cash flow: operacyjny, inwestycyjny, finansowy",
         "keywords": ["przepływy", "działalność operacyjna", "działalność inwestycyjna"],
+        "required": False,
     },
     "POLITYKA RACHUNKOWOŚCI": {
         "label": "Polityka rachunkowości",
@@ -446,6 +447,7 @@ REQUIRED_DOC_TYPES = {
         "desc": "Przyjęte zasady rachunkowości, metody wyceny, okresy amortyzacji",
         "keywords": ["polityka rachunkowości", "zasady rachunkowości", "metody wyceny",
                      "okres amortyzacji", "przyjęte zasady", "opis przyjętych"],
+        "required": False,
     },
     "ZOiS": {
         "label": "Zestawienie Obrotów i Sald",
@@ -487,7 +489,8 @@ def identify_document_type(text: str) -> str:
 def check_missing_documents(doc_mapping: dict) -> list[str]:
     """Zwraca listę typów dokumentów których brakuje wśród wgranych plików."""
     types_found = {d["type"] for d in doc_mapping.values()}
-    return [dt for dt in REQUIRED_DOC_TYPES if dt not in types_found]
+    return [dt for dt in REQUIRED_DOC_TYPES
+            if dt not in types_found and REQUIRED_DOC_TYPES[dt].get("required", True)]
 
 
 def map_documents(parsed_docs: dict) -> dict:
@@ -1350,44 +1353,61 @@ st.divider()
 run_disabled = not (anthropic_key and uploaded_files and company_name)
 if st.button("🚀 Generuj Informację Dodatkową", type="primary",
               disabled=run_disabled, use_container_width=True):
+    st.session_state["run_generation"] = True
+    st.session_state.pop("missing_decision", None)
+    st.session_state.pop("polityka_answers", None)
+    st.session_state.pop("parsed_docs", None)
+    st.session_state.pop("doc_mapping", None)
+    st.session_state.pop("generated_text", None)
+    st.session_state.pop("docx_bytes", None)
+    st.rerun()
+
+if st.session_state.get("run_generation") and uploaded_files:
 
     progress_bar = st.progress(0)
     status_text = st.empty()
     results_container = st.container()
 
     try:
-        # ── KROK 1: Parsowanie ──────────────────────────────────────────────
-        status_text.info("📄 Krok 1/5: Parsowanie dokumentów...")
-        progress_bar.progress(10)
+        # ── KROK 1: Parsowanie (cache w session_state) ───────────────────
+        if "parsed_docs" not in st.session_state:
+            status_text.info("📄 Krok 1/5: Parsowanie dokumentów...")
+            progress_bar.progress(10)
 
-        def update_progress(val, msg):
-            progress_bar.progress(int(10 + val * 20))
-            status_text.info(f"📄 {msg}")
+            def update_progress(val, msg):
+                progress_bar.progress(int(10 + val * 20))
+                status_text.info(f"📄 {msg}")
 
-        # Rozdziel PDF, DOCX i XLSX
-        pdf_files = [f for f in uploaded_files if f.name.lower().endswith(".pdf")]
-        docx_files = [f for f in uploaded_files if f.name.lower().endswith(".docx")]
-        xlsx_files = [f for f in uploaded_files if f.name.lower().endswith(".xlsx")]
+            # Rozdziel PDF, DOCX i XLSX
+            pdf_files = [f for f in uploaded_files if f.name.lower().endswith(".pdf")]
+            docx_files = [f for f in uploaded_files if f.name.lower().endswith(".docx")]
+            xlsx_files = [f for f in uploaded_files if f.name.lower().endswith(".xlsx")]
 
-        parsed = {}
-        if pdf_files:
-            if llama_key:
-                parsed = parse_documents_llamaparse(pdf_files, llama_key, update_progress)
-            else:
-                parsed = parse_documents_fallback(pdf_files, update_progress)
-        for df in docx_files:
-            parsed[df.name] = extract_text_from_docx(df.getvalue())
-        for xf in xlsx_files:
-            parsed[xf.name] = extract_text_from_xlsx(xf.getvalue())
+            parsed = {}
+            if pdf_files:
+                if llama_key:
+                    parsed = parse_documents_llamaparse(pdf_files, llama_key, update_progress)
+                else:
+                    parsed = parse_documents_fallback(pdf_files, update_progress)
+            for df in docx_files:
+                parsed[df.name] = extract_text_from_docx(df.getvalue())
+            for xf in xlsx_files:
+                parsed[xf.name] = extract_text_from_xlsx(xf.getvalue())
+
+            st.session_state["parsed_docs"] = parsed
+        else:
+            parsed = st.session_state["parsed_docs"]
 
         progress_bar.progress(30)
-        st.session_state["parsed_docs"] = parsed
 
-        # ── KROK 2: Mapowanie ───────────────────────────────────────────────
-        status_text.info("🗂️ Krok 2/5: Mapowanie i identyfikacja dokumentów...")
-        progress_bar.progress(40)
-        doc_mapping = map_documents(parsed)
-        st.session_state["doc_mapping"] = doc_mapping
+        # ── KROK 2: Mapowanie (cache w session_state) ────────────────────
+        if "doc_mapping" not in st.session_state:
+            status_text.info("🗂️ Krok 2/5: Mapowanie i identyfikacja dokumentów...")
+            progress_bar.progress(40)
+            doc_mapping = map_documents(parsed)
+            st.session_state["doc_mapping"] = doc_mapping
+        else:
+            doc_mapping = st.session_state["doc_mapping"]
 
         # ── SPRAWDZENIE BRAKUJĄCYCH DOKUMENTÓW ─────────────────────────────
         missing = check_missing_documents(doc_mapping)
@@ -1429,6 +1449,9 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
         # Jeśli użytkownik wrócił po decyzji
         decision = st.session_state.pop("missing_decision", None)
         if decision == "cancel":
+            st.session_state.pop("run_generation", None)
+            st.session_state.pop("parsed_docs", None)
+            st.session_state.pop("doc_mapping", None)
             st.info("Wgraj brakujące pliki i uruchom ponownie.")
             st.stop()
 
@@ -1622,6 +1645,9 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
         st.session_state["docx_bytes"] = docx_bytes
         progress_bar.progress(100)
         status_text.success("✅ Informacja Dodatkowa wygenerowana pomyślnie!")
+        st.session_state.pop("run_generation", None)
+        st.session_state.pop("parsed_docs", None)
+        st.session_state.pop("doc_mapping", None)
 
         # ── Podgląd i pobieranie ────────────────────────────────────────────
         with results_container:
@@ -1642,12 +1668,18 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
 
     except anthropic.AuthenticationError:
         st.session_state.pop("run_generation", None)
+        st.session_state.pop("parsed_docs", None)
+        st.session_state.pop("doc_mapping", None)
         st.error("❌ Nieprawidłowy klucz API Anthropic. Sprawdź wartość w panelu bocznym.")
     except anthropic.RateLimitError:
         st.session_state.pop("run_generation", None)
+        st.session_state.pop("parsed_docs", None)
+        st.session_state.pop("doc_mapping", None)
         st.error("❌ Przekroczono limit zapytań API. Poczekaj chwilę i spróbuj ponownie.")
     except Exception as e:
         st.session_state.pop("run_generation", None)
+        st.session_state.pop("parsed_docs", None)
+        st.session_state.pop("doc_mapping", None)
         st.error(f"❌ Błąd: {e}")
         st.exception(e)
 
