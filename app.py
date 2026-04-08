@@ -158,6 +158,20 @@ def extract_text_from_docx(docx_bytes: bytes) -> str:
     return "\n".join(parts)
 
 
+def extract_text_from_xlsx(xlsx_bytes: bytes) -> str:
+    """Wyciąga tekst z pliku XLSX (wszystkie arkusze, wiersze jako tekst)."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
+    parts = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows(values_only=True):
+            vals = [str(v).strip() if v is not None else "" for v in row]
+            line = " | ".join(v for v in vals if v)
+            if line.strip():
+                parts.append(line)
+    return "\n".join(parts)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODUŁ KRS: POBIERANIE DANYCH Z OFICJALNEGO API MINISTERSTWA SPRAWIEDLIWOŚCI
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -416,7 +430,11 @@ REQUIRED_DOC_TYPES = {
         "desc": "Obroty i salda kont księgi głównej za rok obrotowy",
         "keywords": ["zestawienie obrotów", "obroty i salda", "salda końcowe",
                      "salda otwarcia", "obroty narastająco", "konta syntetyczne",
-                     "księga główna", "salda debetowe", "salda kredytowe"],
+                     "księga główna", "salda debetowe", "salda kredytowe",
+                     "obroty kont", "w układzie zois", "zois za miesiąc",
+                     "obroty kont aktywnych", "obroty kont pasywnych",
+                     "saldo wn", "saldo ma", "obroty wn", "obroty ma",
+                     "bilans otwarcia", "konto", "ob. wn", "ob. ma"],
     },
     "ANKIETA BILANSOWA": {
         "label": "Ankieta bilansowa",
@@ -1271,8 +1289,8 @@ with col1:
     st.markdown('<div class="step-card"><b>📁 Krok 1:</b> Wgraj dokumenty sprawozdania (PDF / DOCX)</div>',
                 unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
-        "Wybierz pliki PDF / DOCX",
-        type=["pdf", "docx"],
+        "Wybierz pliki PDF / DOCX / XLSX",
+        type=["pdf", "docx", "xlsx"],
         accept_multiple_files=True,
         help="Wgraj dokumenty: bilans, RZiS, ŚT, ZOiS, ankietę bilansową itp."
     )
@@ -1314,9 +1332,10 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
             progress_bar.progress(int(10 + val * 20))
             status_text.info(f"📄 {msg}")
 
-        # Rozdziel PDF i DOCX
+        # Rozdziel PDF, DOCX i XLSX
         pdf_files = [f for f in uploaded_files if f.name.lower().endswith(".pdf")]
         docx_files = [f for f in uploaded_files if f.name.lower().endswith(".docx")]
+        xlsx_files = [f for f in uploaded_files if f.name.lower().endswith(".xlsx")]
 
         parsed = {}
         if pdf_files:
@@ -1326,6 +1345,8 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                 parsed = parse_documents_fallback(pdf_files, update_progress)
         for df in docx_files:
             parsed[df.name] = extract_text_from_docx(df.getvalue())
+        for xf in xlsx_files:
+            parsed[xf.name] = extract_text_from_xlsx(xf.getvalue())
 
         progress_bar.progress(30)
         st.session_state["parsed_docs"] = parsed
