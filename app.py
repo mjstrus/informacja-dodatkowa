@@ -325,7 +325,9 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
         for dk in ["dzial1", "dzial2", "dzial3"]:
             dz = dane.get(dk, {})
             for wspol_key in ["wspolnicySpzoo", "wspolnicySpozoo", "wspolnicy",
-                               "informacjaOWspolnikach"]:
+                               "informacjaOWspolnikach",
+                               "komplementariusze", "komandytariusze",
+                               "wspolnicySpolkiKomandytowej"]:
                 candidate = dz.get(wspol_key)
                 if candidate and isinstance(candidate, list) and len(candidate) > 0:
                     wspolnicy_raw = candidate
@@ -338,6 +340,17 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
                             break
             if wspolnicy_raw:
                 break
+
+        # Dla spółek komandytowych — szukaj OBIE grupy wspólników
+        if not wspolnicy_raw:
+            dzial1_keys = dzial1.keys()
+            for dk_key in dzial1_keys:
+                if "komplement" in dk_key.lower() or "komandyt" in dk_key.lower() or "wspol" in dk_key.lower():
+                    candidate = dzial1.get(dk_key)
+                    if isinstance(candidate, list) and len(candidate) > 0:
+                        if wspolnicy_raw is None:
+                            wspolnicy_raw = []
+                        wspolnicy_raw.extend(candidate)
 
         if wspolnicy_raw and isinstance(wspolnicy_raw, list):
             for w in wspolnicy_raw:
@@ -356,6 +369,7 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
                     nazwa_w = f"{imie} {nazwisko}".strip()
                 if not nazwa_w:
                     continue
+                # Udziały (sp. z o.o.) lub wkład (komandytowa)
                 udzialy = w.get("posiadaneUdzialy", w.get("udzialy", {}))
                 liczba = ""
                 wartosc = ""
@@ -366,6 +380,15 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
                         wartosc = wartosc_ud.get("wartosc", "")
                     elif isinstance(wartosc_ud, (str, int, float)):
                         wartosc = str(wartosc_ud)
+                # Wkład (spółka komandytowa)
+                if not wartosc:
+                    wklad = w.get("wartoscWkladu", w.get("wklad", {}))
+                    if isinstance(wklad, dict):
+                        wartosc = wklad.get("wartosc", "")
+                    elif isinstance(wklad, (str, int, float)):
+                        wartosc = str(wklad)
+                    if not liczba:
+                        liczba = "wkład"
                 wspolnicy.append({
                     "nazwa": nazwa_w,
                     "liczba_udzialow": str(liczba),
@@ -1220,7 +1243,16 @@ with st.sidebar:
             st.markdown(f"**Kapitał podstawowy:** {krs_kapital} PLN")
         if krs_wspolnicy:
             for w in krs_wspolnicy:
-                st.markdown(f"- **{w['nazwa']}** — {w['liczba_udzialow']} udziałów, wartość {w['wartosc_udzialow']} PLN")
+                l = w['liczba_udzialow']
+                v = w['wartosc_udzialow']
+                if l == "wkład":
+                    st.markdown(f"- **{w['nazwa']}** — wkład {v} PLN")
+                elif l and v:
+                    st.markdown(f"- **{w['nazwa']}** — {l} udziałów, wartość {v} PLN")
+                elif v:
+                    st.markdown(f"- **{w['nazwa']}** — wartość {v} PLN")
+                else:
+                    st.markdown(f"- **{w['nazwa']}**")
         else:
             st.warning("⚠️ API KRS nie zwróciło danych wspólników.")
 
