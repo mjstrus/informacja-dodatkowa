@@ -336,7 +336,7 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
         for dk in ["dzial1", "dzial2", "dzial3"]:
             dz = dane.get(dk, {})
             for wspol_key in ["wspolnicySpzoo", "wspolnicySpozoo", "wspolnicy",
-                               "informacjaOWspolnikach",
+                               "wspolnicyPartnerzy", "informacjaOWspolnikach",
                                "komplementariusze", "komandytariusze",
                                "wspolnicySpolkiKomandytowej"]:
                 candidate = dz.get(wspol_key)
@@ -352,10 +352,9 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
             if wspolnicy_raw:
                 break
 
-        # Dla spółek komandytowych — szukaj OBIE grupy wspólników
+        # Fallback: szukaj dowolnego klucza z "wspol"/"komplement"/"komandyt"
         if not wspolnicy_raw:
-            dzial1_keys = dzial1.keys()
-            for dk_key in dzial1_keys:
+            for dk_key in dzial1.keys():
                 if "komplement" in dk_key.lower() or "komandyt" in dk_key.lower() or "wspol" in dk_key.lower():
                     candidate = dzial1.get(dk_key)
                     if isinstance(candidate, list) and len(candidate) > 0:
@@ -367,8 +366,11 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
             for w in wspolnicy_raw:
                 if not isinstance(w, dict):
                     continue
+
+                # === NAZWA ===
                 nazwa_w = w.get("nazwa", "")
                 if not nazwa_w:
+                    # Imię
                     imie = w.get("imiona", "")
                     if isinstance(imie, dict):
                         imie = imie.get("imie", "")
@@ -376,30 +378,59 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
                         imie = imie[0] if isinstance(imie[0], str) else imie[0].get("imie", "")
                     if not imie:
                         imie = w.get("imie", "")
+                    # Nazwisko — może być dict {"nazwiskoICzlon": "KOWALSKI"}
                     nazwisko = w.get("nazwisko", "")
+                    if isinstance(nazwisko, dict):
+                        nazwisko = nazwisko.get("nazwiskoICzlon", nazwisko.get("nazwisko", ""))
                     nazwa_w = f"{imie} {nazwisko}".strip()
+
                 if not nazwa_w:
                     continue
-                # Udziały (sp. z o.o.) lub wkład (komandytowa)
-                udzialy = w.get("posiadaneUdzialy", w.get("udzialy", {}))
+
+                # === ROLA (komandytowa) ===
+                rola = ""
+                if w.get("czyJestKomandytariuszem") is True:
+                    rola = "komandytariusz"
+                elif w.get("czyJestKomandytariuszem") is False:
+                    rola = "komplementariusz"
+
+                # === WARTOŚĆ ===
                 liczba = ""
                 wartosc = ""
+
+                # 1. Udziały (sp. z o.o.)
+                udzialy = w.get("posiadaneUdzialy", w.get("udzialy", {}))
                 if isinstance(udzialy, dict):
-                    liczba = udzialy.get("iloscUdzialow", udzialy.get("liczba", ""))
+                    liczba = str(udzialy.get("iloscUdzialow", udzialy.get("liczba", "")))
                     wartosc_ud = udzialy.get("wartoscUdzialow", udzialy.get("wartosc", ""))
                     if isinstance(wartosc_ud, dict):
                         wartosc = wartosc_ud.get("wartosc", "")
                     elif isinstance(wartosc_ud, (str, int, float)):
                         wartosc = str(wartosc_ud)
-                # Wkład (spółka komandytowa)
+
+                # 2. Wkład wspólnika (komandytowa) — kilka możliwych pól
                 if not wartosc:
-                    wklad = w.get("wartoscWkladu", w.get("wklad", {}))
-                    if isinstance(wklad, dict):
-                        wartosc = wklad.get("wartosc", "")
-                    elif isinstance(wklad, (str, int, float)):
-                        wartosc = str(wklad)
-                    if not liczba:
-                        liczba = "wkład"
+                    for wklad_key in ["wartoscWkladuWspolnikaWUmowie",
+                                       "wartoscWkladu", "wklad",
+                                       "wysokoscSumyKomandytowej"]:
+                        wv = w.get(wklad_key, "")
+                        if isinstance(wv, dict):
+                            wv = wv.get("wartosc", "")
+                        if isinstance(wv, (str, int, float)) and str(wv).strip():
+                            wartosc = str(wv)
+                            break
+
+                # 3. Wkłady wniesione (lista)
+                if not wartosc:
+                    wklady = w.get("wkladyWniesione", [])
+                    if isinstance(wklady, list) and wklady:
+                        wk0 = wklady[0]
+                        if isinstance(wk0, dict):
+                            wartosc = str(wk0.get("wartosc", ""))
+
+                if not liczba and rola:
+                    liczba = rola
+
                 wspolnicy.append({
                     "nazwa": nazwa_w,
                     "liczba_udzialow": str(liczba),
@@ -837,7 +868,16 @@ Na podstawie powyższych wypełnij sekcje 1.2–1.5.""".format(
         if kapital_podst:
             context_parts.append(f"Kapitał podstawowy: {kapital_podst} PLN")
         for w in wspolnicy:
-            context_parts.append(f"  - {w.get('nazwa','?')}: {w.get('liczba_udzialow','?')} udziałów, wartość {w.get('wartosc_udzialow','?')} PLN")
+            l = w.get('liczba_udzialow', '')
+            v = w.get('wartosc_udzialow', '')
+            n = w.get('nazwa', '?')
+            if l in ("komandytariusz", "komplementariusz"):
+                line = f"  - {n} ({l})"
+                if v:
+                    line += f", wkład: {v}"
+                context_parts.append(line)
+            else:
+                context_parts.append(f"  - {n}: {l} udziałów, wartość {v} PLN")
 
     # Wynagrodzenie audytora
     wyn_aud = info.get("wynagrodzenie_audytora", "")
@@ -1259,14 +1299,18 @@ with st.sidebar:
             for w in krs_wspolnicy:
                 l = w['liczba_udzialow']
                 v = w['wartosc_udzialow']
-                if l == "wkład":
-                    st.markdown(f"- **{w['nazwa']}** — wkład {v} PLN")
+                name = w['nazwa']
+                if l in ("komandytariusz", "komplementariusz"):
+                    line = f"- **{name}** ({l})"
+                    if v:
+                        line += f" — wkład {v}"
+                    st.markdown(line)
                 elif l and v:
-                    st.markdown(f"- **{w['nazwa']}** — {l} udziałów, wartość {v} PLN")
+                    st.markdown(f"- **{name}** — {l} udziałów, wartość {v} PLN")
                 elif v:
-                    st.markdown(f"- **{w['nazwa']}** — wartość {v} PLN")
+                    st.markdown(f"- **{name}** — wartość {v}")
                 else:
-                    st.markdown(f"- **{w['nazwa']}**")
+                    st.markdown(f"- **{name}**")
         else:
             st.warning("⚠️ API KRS nie zwróciło danych wspólników.")
 
