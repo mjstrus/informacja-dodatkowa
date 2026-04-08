@@ -235,6 +235,17 @@ def fetch_krs_by_krs_nr_debug(krs_nr: str) -> tuple:
                 parsed = _parse_odpis(data, krs_clean)
                 if parsed:
                     log.append("\n✅ Dane sparsowane pomyślnie")
+                    log.append(f"   Kapitał: {parsed.get('kapital_podstawowy', 'brak')}")
+                    log.append(f"   Wspólnicy znalezieni: {len(parsed.get('wspolnicy', []))}")
+                    for w in parsed.get("wspolnicy", []):
+                        log.append(f"     → {w['nazwa']}: {w['liczba_udzialow']} udz., {w['wartosc_udzialow']} PLN")
+                    # Surowe dane wspólników z API
+                    odpis = data.get("odpis", data)
+                    dzial1 = odpis.get("dane", {}).get("dzial1", {})
+                    for key in dzial1:
+                        if "wspol" in key.lower() or "komplement" in key.lower() or "komandyt" in key.lower():
+                            raw = _json.dumps(dzial1[key], ensure_ascii=False, indent=2)[:3000]
+                            log.append(f"\n   RAW {key}:\n{raw}")
                     return parsed, "\n".join(log)
             else:
                 log.append(f"  Błąd: {r.text[:200]}")
