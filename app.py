@@ -1,22 +1,18 @@
 """
 Automatyzator Informacji Dodatkowej do sprawozdania finansowego
-Streamlit app z Claude 3.5 Sonnet + LlamaParse + python-docx
+Streamlit app z Claude API + python-docx
 """
 
 import streamlit as st
 import anthropic
-import os
 import io
 import json
 import re
-import tempfile
-from pathlib import Path
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-import base64
 import requests
 from datetime import date
 import matplotlib
@@ -78,7 +74,7 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def extract_text_from_pdf_basic(pdf_bytes: bytes, filename: str) -> str:
-    """Ekstrakcja tekstu z PDF przy użyciu pypdf (fallback bez LlamaParse)."""
+    """Ekstrakcja tekstu z PDF przy użyciu pypdf."""
     try:
         import pypdf
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
@@ -92,46 +88,8 @@ def extract_text_from_pdf_basic(pdf_bytes: bytes, filename: str) -> str:
         return f"[BŁĄD ekstrakcji {filename}: {e}]"
 
 
-def parse_documents_llamaparse(pdf_files: list, llama_api_key: str, progress_callback=None) -> dict:
-    """
-    Krok 1 & 2: Parsowanie PDF przez LlamaParse + identyfikacja dokumentów.
-    Zwraca słownik: {nazwa_pliku: tekst_markdown}
-    """
-    try:
-        from llama_parse import LlamaParse
-        parser = LlamaParse(
-            api_key=llama_api_key,
-            result_type="markdown",
-            language="pl",
-            parsing_instruction=(
-                "Dokument to sprawozdanie finansowe polskiej spółki. "
-                "Zachowaj strukturę tabel finansowych. "
-                "Oznacz wyraźnie: BILANS, RACHUNEK ZYSKÓW I STRAT, NOTY."
-            )
-        )
-        results = {}
-        for idx, uploaded_file in enumerate(pdf_files):
-            if progress_callback:
-                progress_callback(idx / len(pdf_files), f"Parsowanie: {uploaded_file.name}")
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                tmp.write(uploaded_file.getvalue())
-                tmp_path = tmp.name
-            try:
-                docs = parser.load_data(tmp_path)
-                results[uploaded_file.name] = "\n\n".join(d.text for d in docs)
-            finally:
-                os.unlink(tmp_path)
-        return results
-    except ImportError:
-        st.warning("⚠️ LlamaParse niedostępny – używam pypdf jako fallback.")
-        return parse_documents_fallback(pdf_files, progress_callback)
-    except Exception as e:
-        st.warning(f"⚠️ Błąd LlamaParse ({e}) – używam pypdf jako fallback.")
-        return parse_documents_fallback(pdf_files, progress_callback)
-
-
-def parse_documents_fallback(pdf_files: list, progress_callback=None) -> dict:
-    """Fallback: ekstrakcja przez pypdf."""
+def parse_documents(pdf_files: list, progress_callback=None) -> dict:
+    """Parsowanie PDF przez pypdf."""
     results = {}
     for idx, uploaded_file in enumerate(pdf_files):
         if progress_callback:
@@ -1179,7 +1137,6 @@ def save_to_word(generated_text,company_name,year,company_info=None):
 
 # ── Odczyt kluczy z Streamlit Secrets (jeśli ustawione) ─────────────────────
 _anthropic_from_secrets = st.secrets.get("ANTHROPIC_API_KEY", "")
-_llama_from_secrets = st.secrets.get("LLAMA_API_KEY", "")
 _app_password = st.secrets.get("APP_PASSWORD", "")
 
 # ── Ochrona hasłem ───────────────────────────────────────────────────────────────────────────
@@ -1219,17 +1176,6 @@ with st.sidebar:
             type="password",
             placeholder="sk-ant-...",
             help="Wymagany do generowania przez Claude 3.5 Sonnet"
-        )
-
-    if _llama_from_secrets:
-        st.success("🦙 Klucz LlamaParse: wczytany automatycznie")
-        llama_key = _llama_from_secrets
-    else:
-        llama_key = st.text_input(
-            "🦙 Klucz API LlamaParse (opcjonalny)",
-            type="password",
-            placeholder="llx-...",
-            help="Dla lepszej ekstrakcji tabel. Bez niego użyty zostanie pypdf."
         )
 
     st.divider()
@@ -1482,10 +1428,7 @@ if st.session_state.get("run_generation") and uploaded_files:
 
             parsed = {}
             if pdf_files:
-                if llama_key:
-                    parsed = parse_documents_llamaparse(pdf_files, llama_key, update_progress)
-                else:
-                    parsed = parse_documents_fallback(pdf_files, update_progress)
+                parsed = parse_documents(pdf_files, update_progress)
             for df in docx_files:
                 parsed[df.name] = extract_text_from_docx(df.getvalue())
             for xf in xlsx_files:
