@@ -1237,11 +1237,11 @@ with st.sidebar:
 
     # ── Pobieranie z KRS po NIP ──────────────────────────────────────────
     krs_input = st.text_input(
-        "🔍 Numer KRS spółki",
+        "🔍 Numer KRS spółki (opcjonalnie)",
         placeholder="0000123456",
-        help="Wpisz 10-cyfrowy numer KRS. Znajdziesz go na prs.ms.gov.pl lub w dokumentach spółki."
+        help="Opcjonalne — wpisz numer KRS aby auto-wypełnić dane. Dla JDG/CEIDG zostaw puste i wpisz dane ręcznie."
     )
-    st.caption("ℹ️ Oficjalne API KRS działa po numerze KRS (nie NIP). NIP uzupełnisz ręcznie.")
+    st.caption("ℹ️ KRS opcjonalny. Dla firm bez KRS (JDG) wpisz dane ręcznie w pola poniżej.")
     debug_krs = st.checkbox("🔍 Tryb diagnostyczny KRS", value=False,
                              help="Pokaż surową odpowiedź API KRS — pomocne przy błędach")
 
@@ -1294,20 +1294,21 @@ with st.sidebar:
                                       placeholder="RRRR-MM-DD")
     company_forma = st.text_input("Forma prawna",
                                    value=krs.get("forma_prawna", ""),
-                                   placeholder="np. SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ")
+                                   placeholder="np. SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ / JDG")
 
     # Wspólnicy — edytowalne pola, auto-wypełniane z KRS
     st.divider()
-    st.subheader("👥 Wspólnicy / Udziałowcy")
-    st.caption("ℹ️ Dane pobrane z KRS mogą być ocenzurowane (RODO). Uzupełnij pełne dane ręcznie.")
+    st.subheader("👥 Wspólnicy / Właściciel")
+    st.caption("Dla spółek — auto-wypełniane z KRS (dane mogą być ocenzurowane, popraw ręcznie). "
+               "Dla JDG / CEIDG — wpisz dane właściciela ręcznie.")
 
     krs_wspolnicy = krs.get("wspolnicy", [])
     krs_kapital = krs.get("kapital_podstawowy", "")
 
     kapital_podstawowy = st.text_input(
-        "Kapitał podstawowy (PLN)",
+        "Kapitał podstawowy (PLN) — nie dotyczy JDG",
         value=krs_kapital,
-        placeholder="np. 5 000,00"
+        placeholder="np. 5 000,00 (zostaw puste dla JDG)"
     )
 
     # Inicjalizuj listę wspólników z KRS (jeśli jeszcze nie edytowano)
@@ -1318,10 +1319,11 @@ with st.sidebar:
         ]
 
     n_wspolnikow = st.number_input(
-        "Liczba wspólników",
+        "Liczba wspólników / właścicieli",
         min_value=0, max_value=20,
         value=len(st.session_state.get("wspolnicy_edit", krs_wspolnicy)),
-        step=1
+        step=1,
+        help="Dla JDG wpisz 1 (właściciel)"
     )
 
     wspolnicy_edit = []
@@ -1336,7 +1338,7 @@ with st.sidebar:
 
         cols = st.columns([3, 2, 2])
         with cols[0]:
-            nazwa = st.text_input(f"Wspólnik {i+1} — imię i nazwisko / nazwa",
+            nazwa = st.text_input(f"Wspólnik/właściciel {i+1} — imię i nazwisko / nazwa",
                                    value=defaults.get("nazwa", ""),
                                    key=f"wsp_nazwa_{i}")
         with cols[1]:
