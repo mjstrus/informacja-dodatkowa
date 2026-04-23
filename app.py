@@ -875,8 +875,8 @@ Na podstawie powyższych wypełnij sekcje 1.2–1.5.""".format(
             "— napisz: 'Na dzień sporządzenia sprawozdania Spółka nie przedłożyła danych w tym zakresie.'"
         )
 
-    # Dokumenty finansowe
-    context_parts.append("\nWYCIĄGI Z DOKUMENTÓW FINANSOWYCH:")
+    # Dokumenty finansowe — ROK BIEŻĄCY
+    context_parts.append("\nWYCIĄGI Z DOKUMENTÓW FINANSOWYCH (ROK BIEŻĄCY):")
     for filename, doc_data in doc_mapping.items():
         if doc_data["type"] == "ANKIETA BILANSOWA":
             continue
@@ -884,6 +884,19 @@ Na podstawie powyższych wypełnij sekcje 1.2–1.5.""".format(
         context_parts.append(doc_data["text"][:8000])
         if len(doc_data["text"]) > 8000:
             context_parts.append("...[tekst skrócony]")
+
+    # Dokumenty finansowe — ROK POPRZEDNI (z innego źródła)
+    prev_year_docs = info.get("prev_year_docs", {})
+    if prev_year_docs:
+        context_parts.append("\n" + "=" * 60)
+        context_parts.append("📂 DOKUMENTY ZA ROK POPRZEDNI (z innego źródła/biura):")
+        context_parts.append("Użyj ich do kolumn \'rok poprzedni\' w tabelach porównawczych.")
+        context_parts.append("=" * 60)
+        for filename, doc_data in prev_year_docs.items():
+            context_parts.append(f"\n[ROK POPRZEDNI — {doc_data['type']}] {filename}:")
+            context_parts.append(doc_data["text"][:8000])
+            if len(doc_data["text"]) > 8000:
+                context_parts.append("...[tekst skrócony]")
 
     full_context = "\n".join(context_parts)
 
@@ -1364,20 +1377,31 @@ with st.sidebar:
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.markdown('<div class="step-card"><b>📁 Krok 1:</b> Wgraj dokumenty sprawozdania (PDF / DOCX)</div>',
+    st.markdown('<div class="step-card"><b>📁 Krok 1:</b> Wgraj dokumenty sprawozdania</div>',
                 unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
-        "Wybierz pliki PDF / DOCX / XLSX",
+        "Dokumenty za ROK BIEŻĄCY (obowiązkowe)",
         type=["pdf", "docx", "xlsx"],
         accept_multiple_files=True,
         help="Wgraj dokumenty: bilans, RZiS, ŚT, ZOiS, ankietę bilansową itp."
     )
 
     if uploaded_files:
-        st.success(f"✅ Wgrano {len(uploaded_files)} plik(ów)")
+        st.success(f"✅ Wgrano {len(uploaded_files)} plik(ów) za rok bieżący")
         for f in uploaded_files:
             size_kb = len(f.getvalue()) // 1024
             st.caption(f"📄 {f.name} ({size_kb} KB)")
+
+    with st.expander("📂 Dokumenty za rok poprzedni z innego źródła (opcjonalnie)"):
+        st.caption("Jeśli dane za rok poprzedni pochodzą z innego biura — wgraj je tutaj.")
+        uploaded_prev = st.file_uploader(
+            "Dokumenty za ROK POPRZEDNI",
+            type=["pdf", "docx", "xlsx"],
+            accept_multiple_files=True,
+            key="prev_year_files",
+        )
+        if uploaded_prev:
+            st.success(f"✅ Wgrano {len(uploaded_prev)} plik(ów) za rok poprzedni")
 
 with col2:
     st.markdown('<div class="step-card"><b>🔍 Krok 2:</b> Walidacja i mapowanie dokumentów</div>',
@@ -1400,6 +1424,7 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
     st.session_state.pop("missing_decision", None)
     st.session_state.pop("polityka_answers", None)
     st.session_state.pop("parsed_docs", None)
+    st.session_state.pop("parsed_prev", None)
     st.session_state.pop("doc_mapping", None)
     st.session_state.pop("generated_text", None)
     st.session_state.pop("docx_bytes", None)
@@ -1435,9 +1460,26 @@ if st.session_state.get("run_generation") and uploaded_files:
                 parsed[xf.name] = extract_text_from_xlsx(xf.getvalue())
 
             st.session_state["parsed_docs"] = parsed
+
+            # Parsowanie dokumentów za rok poprzedni (jeśli wgrano)
+            parsed_prev = {}
+            prev_files = uploaded_prev if uploaded_prev else []
+            if prev_files:
+                status_text.info("📄 Parsowanie dokumentów za rok poprzedni...")
+                prev_pdf = [f for f in prev_files if f.name.lower().endswith(".pdf")]
+                prev_docx = [f for f in prev_files if f.name.lower().endswith(".docx")]
+                prev_xlsx = [f for f in prev_files if f.name.lower().endswith(".xlsx")]
+                if prev_pdf:
+                    parsed_prev = parse_documents(prev_pdf)
+                for df in prev_docx:
+                    parsed_prev[df.name] = extract_text_from_docx(df.getvalue())
+                for xf in prev_xlsx:
+                    parsed_prev[xf.name] = extract_text_from_xlsx(xf.getvalue())
+            st.session_state["parsed_prev"] = parsed_prev
         else:
             parsed = st.session_state["parsed_docs"]
 
+        parsed_prev = st.session_state.get("parsed_prev", {})
         progress_bar.progress(30)
 
         # ── KROK 2: Mapowanie (cache w session_state) ────────────────────
@@ -1670,6 +1712,7 @@ if st.session_state.get("run_generation") and uploaded_files:
                 {"nazwa": w["nazwa"], "liczba_udzialow": w["rola"], "wartosc_udzialow": w["wartosc"]}
                 for w in wspolnicy_edit
             ],
+            "prev_year_docs": map_documents(parsed_prev) if parsed_prev else {},
         }
         generated_text = generate_accounting_notes(
             doc_mapping=doc_mapping,
