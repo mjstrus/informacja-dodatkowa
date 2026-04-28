@@ -498,12 +498,91 @@ def map_documents(parsed_docs: dict) -> dict:
     mapping = {}
     for filename, text in parsed_docs.items():
         doc_type = identify_document_type(text)
+        # Preprocessing dla ewidencji ŚT (Symfonia)
+        if doc_type == "ŚRODKI TRWAŁE":
+            text = _preprocess_srodki_trwale(text)
         mapping[filename] = {
             "type": doc_type,
             "text": text,
             "length": len(text)
         }
     return mapping
+
+
+def _preprocess_srodki_trwale(text: str) -> str:
+    """
+    Wyciąga podsumowania GRUP i wiersz RAZEM z ewidencji ŚT (Symfonia).
+    Zwraca czytelną tabelę markdown dołączoną na końcu tekstu.
+    """
+    lines = text.split("\n")
+    groups = []
+    final_razem = None
+
+    for line in lines:
+        line_stripped = line.strip()
+        # Podsumowania GRUP: "GRUPA: _Środki trwałe\07 Środki transportu 2.391.285,76 ..."
+        if line_stripped.startswith("GRUPA:") and re.search(r"\d+[.,]\d+", line_stripped):
+            # Wyciągnij nazwę grupy i liczby
+            name_match = re.search(r"\\(\d{2})\s+(.+?)(?:\s+\d)", line_stripped)
+            if not name_match:
+                name_match = re.search(r"GRUPA:.*?(\d{2})\s+(.+?)(?:\s+\d)", line_stripped)
+            numbers = re.findall(r"[\d]+(?:[.\s]\d{3})*(?:,\d+)?", line_stripped)
+            # Bierzemy ostatnie 6 liczb (zakup, pocz_brutto, kon_brutto, umorzenie_rok, umorzenie_dot, netto)
+            nums = []
+            for n in numbers:
+                cleaned = n.replace(" ", "").replace(".", "").replace(",", ".")
+                try:
+                    nums.append(float(cleaned))
+                except ValueError:
+                    pass
+
+            if len(nums) >= 6:
+                grupa_name = name_match.group(2).strip() if name_match else line_stripped[:50]
+                groups.append({
+                    "name": grupa_name,
+                    "zakup": nums[-6],
+                    "pocz_brutto": nums[-5],
+                    "kon_brutto": nums[-4],
+                    "umorzenie_rok": nums[-3],
+                    "umorzenie_dot": nums[-2],
+                    "netto": nums[-1],
+                })
+
+        # Wiersz "Razem" na ostatniej stronie
+        if line_stripped.startswith("Razem") and "ostatnia" in text[text.find(line_stripped):text.find(line_stripped)+200]:
+            numbers = re.findall(r"[\d]+(?:[.\s]\d{3})*(?:,\d+)?", line_stripped)
+            nums = []
+            for n in numbers:
+                cleaned = n.replace(" ", "").replace(".", "").replace(",", ".")
+                try:
+                    nums.append(float(cleaned))
+                except ValueError:
+                    pass
+            if len(nums) >= 6:
+                final_razem = nums[-6:]
+
+    if not groups and not final_razem:
+        return text
+
+    # Zbuduj czytelną tabelę
+    summary = "\n\n═══ PODSUMOWANIE EWIDENCJI ŚRODKÓW TRWAŁYCH (dane przetworzone) ═══\n"
+    summary += "| Grupa KŚT | Wart. zakupu | Wart. brutto pocz. roku | Wart. brutto kon. roku | Umorzenie za rok | Umorzenie łącznie | Wartość netto |\n"
+    summary += "|---|---|---|---|---|---|---|\n"
+    for g in groups:
+        summary += (
+            f"| {g['name']} | {g['zakup']:,.2f} | {g['pocz_brutto']:,.2f} | "
+            f"{g['kon_brutto']:,.2f} | {g['umorzenie_rok']:,.2f} | {g['umorzenie_dot']:,.2f} | "
+            f"{g['netto']:,.2f} |\n"
+        )
+    if final_razem:
+        summary += (
+            f"| **RAZEM** | **{final_razem[0]:,.2f}** | **{final_razem[1]:,.2f}** | "
+            f"**{final_razem[2]:,.2f}** | **{final_razem[3]:,.2f}** | **{final_razem[4]:,.2f}** | "
+            f"**{final_razem[5]:,.2f}** |\n"
+        )
+    summary += "\nUWAGA: Powyższa tabela zawiera PRAWIDŁOWE wartości z ewidencji ŚT. Użyj ICH do not objaśniających.\n"
+
+    return text + summary
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
