@@ -326,25 +326,44 @@ REQUIRED_DOC_TYPES = {
         "keywords": ["polityka rachunkowości", "zasady rachunkowości", "metody wyceny",
                      "okres amortyzacji", "przyjęte zasady", "opis przyjętych"],
     },
-    "NOTY OBJAŚNIAJĄCE": {
-        "label": "Noty objaśniające",
-        "icon": "📝",
-        "desc": "Dodatkowe noty i objaśnienia do pozycji sprawozdania",
-        "keywords": ["nota ", "objaśnienie", "dodatkowe informacje"],
-    },
     "ZOiS": {
         "label": "Zestawienie Obrotów i Sald",
         "icon": "⚖️",
         "desc": "Obroty i salda kont księgi głównej za rok obrotowy",
         "keywords": ["zestawienie obrotów", "obroty i salda", "salda końcowe",
                      "salda otwarcia", "obroty narastająco", "konta syntetyczne",
-                     "księga główna", "salda debetowe", "salda kredytowe"],
+                     "księga główna", "salda debetowe", "salda kredytowe",
+                     "konta aktywne", "obroty debetowe", "obroty kredytowe",
+                     "saldo dt", "saldo ct", "stan na", "obroty za okres",
+                     "zestawienie kont", "plan kont"],
     },
 }
 
 
 def identify_document_type(text: str) -> str:
-    """Heurystyczna identyfikacja typu dokumentu finansowego."""
+    """
+    Identyfikacja typu dokumentu finansowego.
+    Krok 1: szuka nagłówka w pierwszych 500 znakach (tytuł dokumentu).
+    Krok 2: jeśli brak — liczy słowa kluczowe w całym tekście.
+    """
+    # Nagłówki które jednoznacznie identyfikują dokument
+    HEADER_RULES = [
+        ("ZOiS",                    ["zestawienie obrotów i sald", "obroty i salda", "zois"]),
+        ("BILANS",                   ["bilans na dzień", "bilans jednostki", "aktywa i pasywa"]),
+        ("RZiS",                     ["rachunek zysków i strat", "rachunek wyników",
+                                       "wynik finansowy netto"]),
+        ("ŚRODKI TRWAŁE",            ["tabela środków trwałych", "środki trwałe i wartości",
+                                       "zestawienie środków trwałych"]),
+        ("POLITYKA RACHUNKOWOŚCI",   ["polityka rachunkowości", "zasady rachunkowości przyjęte"]),
+        ("PRZEPŁYWY PIENIĘŻNE",      ["rachunek przepływów pieniężnych", "cash flow"]),
+    ]
+
+    header = text[:500].lower()
+    for doc_type, phrases in HEADER_RULES:
+        if any(phrase in header for phrase in phrases):
+            return doc_type
+
+    # Fallback: zliczanie słów kluczowych w całym tekście
     text_lower = text.lower()
     scores = {}
     for doc_type, info in REQUIRED_DOC_TYPES.items():
@@ -885,7 +904,6 @@ with st.sidebar:
     - 🏗️ Tabela środków trwałych
     - 💸 Przepływy pieniężne
     - 📜 Polityka rachunkowości
-    - 📝 Noty objaśniające
     - ⚖️ Zestawienie Obrotów i Sald (ZOiS)
     """)
 
