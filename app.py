@@ -832,74 +832,90 @@ def add_horizontal_rule(doc: Document):
     pPr.append(pBdr)
 
 
-# ─── KOLORY DOKUMENTU ────────────────────────────────────────────────────────
-NAVY  = RGBColor(0x1e, 0x3a, 0x5f)
-BLUE  = RGBColor(0x2d, 0x6a, 0x9f)
-GOLD  = RGBColor(0xC9, 0xA2, 0x27)
-GRAY  = RGBColor(0xF2, 0xF2, 0xF2)
-WHITE = RGBColor(0xFF, 0xFF, 0xFF)
-DARK  = RGBColor(0x22, 0x22, 0x22)
+# ─── KOLORY (wzór z 28.03.2026) ─────────────────────────────────────────────
+NAVY  = RGBColor(0x1B, 0x2A, 0x4A)   # nagłówki, tło tabel
+BLUE  = RGBColor(0x2D, 0x6A, 0x9F)   # Heading 2, akcenty
+WHITE = RGBColor(0xFF, 0xFF, 0xFF)   # tekst na ciemnym tle
+DARK  = RGBColor(0x22, 0x22, 0x22)   # tekst normalny
+GRAY6 = RGBColor(0x66, 0x66, 0x66)   # dane na stronie tytułowej
+GRAY9 = RGBColor(0x99, 0x99, 0x99)   # stopka, data
+LIGHT = "EBF3FB"                      # naprzemienne wiersze tabel
 
 
-def _set_cell_bg(cell, color_hex: str):
-    """Ustawia kolor tła komórki tabeli."""
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    tc = cell._tc
-    tcPr = tc.get_or_add_tcPr()
-    shd = OxmlElement("w:shd")
-    shd.set(qn("w:val"), "clear")
-    shd.set(qn("w:color"), "auto")
-    shd.set(qn("w:fill"), color_hex)
+def _tcPr_shading(cell, fill_hex: str):
+    """Ustawia kolor tła komórki."""
+    from docx.oxml.ns import qn as _qn
+    from docx.oxml import OxmlElement as _OE
+    tcPr = cell._tc.get_or_add_tcPr()
+    shd = _OE("w:shd")
+    shd.set(_qn("w:val"),   "clear")
+    shd.set(_qn("w:color"), "auto")
+    shd.set(_qn("w:fill"),  fill_hex)
     tcPr.append(shd)
 
 
-def _add_paragraph_with_runs(doc, line: str, style=None):
-    """Dodaje akapit z obsługą **bold** i *italic* w tekście."""
+def _cell_margins(cell, val: int = 80):
+    """Ustawia marginesy wewnętrzne komórki."""
+    from docx.oxml.ns import qn as _qn
+    from docx.oxml import OxmlElement as _OE
+    tcPr = cell._tc.get_or_add_tcPr()
+    tcMar = _OE("w:tcMar")
+    for side in ("top", "bottom", "left", "right"):
+        el = _OE(f"w:{side}")
+        el.set(_qn("w:w"),    str(val))
+        el.set(_qn("w:type"), "dxa")
+        tcMar.append(el)
+    tcPr.append(tcMar)
+
+
+def _add_runs(paragraph, text: str, bold=False, color=None, size_pt=None):
+    """Dodaje run z opcjonalnym formatowaniem."""
+    run = paragraph.add_run(text)
+    run.font.name = "Calibri"
+    if bold is not None:
+        run.font.bold = bold
+    if color:
+        run.font.color.rgb = color
+    if size_pt:
+        run.font.size = Pt(size_pt)
+    return run
+
+
+def _add_inline_text(doc, line: str, style=None):
+    """Akapit z obsługą **bold** inline."""
     p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
-    parts = re.split(r"(\*\*[^*]+\*\*|\*[^*]+\*)", line)
+    p.paragraph_format.space_before = Pt(2)
+    p.paragraph_format.space_after  = Pt(2)
+    parts = re.split(r"(\*\*[^*]+\*\*)", line)
     for part in parts:
         if part.startswith("**") and part.endswith("**"):
-            run = p.add_run(part[2:-2])
-            run.bold = True
-            run.font.color.rgb = DARK
-        elif part.startswith("*") and part.endswith("*"):
-            run = p.add_run(part[1:-1])
-            run.italic = True
+            _add_runs(p, part[2:-2], bold=True)
         else:
-            run = p.add_run(part)
-            run.font.color.rgb = DARK
+            _add_runs(p, part, bold=False)
     return p
 
 
-def _render_markdown_table(doc, table_lines: list):
-    """Renderuje tabelę Markdown jako profesjonalną tabelę Word."""
-    # Filtruj linie separatora (|---|---|)
-    data_lines = [l for l in table_lines
-                  if not re.match(r"^\|[\s\-:|]+\|", l)]
-    if not data_lines:
+def _render_md_table(doc, table_lines: list):
+    """Renderuje tabelę Markdown jako tabelę Word — styl wzoru z 28.03.2026."""
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.oxml.ns import qn as _qn
+
+    # Odfiltruj separator (|---|)
+    rows_raw = [l for l in table_lines
+                if not re.match(r"^\|[\s\-:|]+\|$", l.strip())]
+    if not rows_raw:
         return
 
     rows = []
-    for line in data_lines:
-        # Podziel po | i oczyść
+    for line in rows_raw:
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         rows.append(cells)
 
-    if not rows:
-        return
-
     ncols = max(len(r) for r in rows)
-    # Wyrównaj liczbę kolumn
-    rows = [r + [""] * (ncols - len(r)) for r in rows]
+    rows  = [r + [""] * (ncols - len(r)) for r in rows]
 
-    # Oblicz szerokości kolumn (łącznie ~9000 DXA dla A4 z marginesami 1.2")
-    total_width = 9000
-    col_width = total_width // ncols
-
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    from docx.enum.table import WD_TABLE_ALIGNMENT
+    # Szerokości: łącznie ~8500 DXA (A4 z marginesami 2.5cm)
+    col_w = 8500 // ncols
 
     table = doc.add_table(rows=len(rows), cols=ncols)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -908,185 +924,208 @@ def _render_markdown_table(doc, table_lines: list):
     for ri, row_data in enumerate(rows):
         row = table.rows[ri]
         is_header = (ri == 0)
-        for ci, cell_text in enumerate(row_data):
+        for ci, raw_text in enumerate(row_data):
             cell = row.cells[ci]
-            # Szerokość komórki
-            cell.width = Pt(col_width)
+            cell.width = Pt(col_w)
 
-            # Kolor nagłówka
+            # Tło
             if is_header:
-                _set_cell_bg(cell, "1e3a5f")
-            elif ri % 2 == 0:
-                _set_cell_bg(cell, "EBF3FB")
+                _tcPr_shading(cell, "1B2A4A")
+            elif ri % 2 == 1:
+                _tcPr_shading(cell, LIGHT)
 
-            # Usuń bold markdown z tekstu komórki
-            clean = re.sub(r"\*\*([^*]+)\*\*", r"", cell_text)
+            _cell_margins(cell, 80)
+
+            # Tekst — usuń bold markdown
+            clean = re.sub(r"\*\*([^*]+)\*\*", r"", raw_text)
+            is_bold_md = "**" in raw_text
 
             p = cell.paragraphs[0]
             p.clear()
             run = p.add_run(clean)
             run.font.name = "Calibri"
             run.font.size = Pt(9)
+            run.font.bold = is_header or is_bold_md
+            run.font.color.rgb = WHITE if is_header else DARK
+
+            # Liczby do prawej, nagłówki do środka
             if is_header:
-                run.font.bold = True
-                run.font.color.rgb = WHITE
-            else:
-                run.font.color.rgb = DARK
-
-            # Wyrównanie liczb do prawej
-            if re.search(r"\d", clean) and not is_header:
-                p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            elif is_header:
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-            # Marginesy komórki
-            tcPr = cell._tc.get_or_add_tcPr()
-            tcMar = OxmlElement("w:tcMar")
-            for side in ["top", "bottom", "left", "right"]:
-                el = OxmlElement(f"w:{side}")
-                el.set(qn("w:w"), "80")
-                el.set(qn("w:type"), "dxa")
-                tcMar.append(el)
-            tcPr.append(tcMar)
+            elif re.search(r"\d", clean):
+                p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
     doc.add_paragraph()  # odstęp po tabeli
 
 
 def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
     """
-    Konwertuje wygenerowaną treść AI na profesjonalny plik .docx
-    z pełną obsługą tabel Markdown, nagłówków i formatowania.
+    Generuje .docx w formacie identycznym z wzorem z 28.03.2026.
+    Calibri, marginesy 2.5cm, nagłówki NAVY/BLUE, tabele z granatowym nagłówkiem.
     """
+    from docx.oxml.ns import qn as _qn
+    from docx.oxml import OxmlElement as _OE
+
     doc = Document()
 
-    # ── Style globalne ────────────────────────────────────────────────────────
-    style = doc.styles["Normal"]
-    style.font.name = "Calibri"
-    style.font.size = Pt(11)
-    style.font.color.rgb = DARK
+    # ── Style globalne — Calibri 10pt ─────────────────────────────────────
+    normal = doc.styles["Normal"]
+    normal.font.name = "Calibri"
+    normal.font.size = Pt(10)
 
-    # ── Marginesy A4 ─────────────────────────────────────────────────────────
+    # Heading 1: 14pt, bold, NAVY
+    h1s = doc.styles["Heading 1"]
+    h1s.font.name  = "Calibri"
+    h1s.font.size  = Pt(14)
+    h1s.font.bold  = True
+    h1s.font.color.rgb = NAVY
+
+    # Heading 2: 12pt, bold, BLUE
+    h2s = doc.styles["Heading 2"]
+    h2s.font.name  = "Calibri"
+    h2s.font.size  = Pt(12)
+    h2s.font.bold  = True
+    h2s.font.color.rgb = BLUE
+
+    # Heading 3: 11pt, bold, NAVY
+    h3s = doc.styles["Heading 3"]
+    h3s.font.name  = "Calibri"
+    h3s.font.size  = Pt(11)
+    h3s.font.bold  = True
+    h3s.font.color.rgb = NAVY
+
+    # ── Marginesy (wzór: 2.5cm lewy/prawy, 2.0cm górny, 1.8cm dolny) ─────
+    from docx.shared import Cm
     for section in doc.sections:
-        section.left_margin  = Inches(1.18)  # ~3 cm
-        section.right_margin = Inches(1.18)
-        section.top_margin   = Inches(0.98)  # ~2.5 cm
-        section.bottom_margin = Inches(0.98)
+        section.left_margin   = Cm(2.5)
+        section.right_margin  = Cm(2.5)
+        section.top_margin    = Cm(2.0)
+        section.bottom_margin = Cm(1.8)
 
-    # ── Strona tytułowa ───────────────────────────────────────────────────────
-    # Nagłówek z tłem
+    # ── STRONA TYTUŁOWA ───────────────────────────────────────────────────
+    # Wiersz z nazwą spółki i tytułem w stopce (kursywa, szara)
+    header_line = doc.add_paragraph()
+    _add_runs(header_line,
+              f"{company_name} | Informacja Dodatkowa {year}",
+              bold=False, color=GRAY6, size_pt=9)
+    header_line.paragraph_format.space_after = Pt(12)
+
+    # Tytuł główny
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    pPr = title_p._p.get_or_add_pPr()
-    from docx.oxml import OxmlElement as OE
-    from docx.oxml.ns import qn
-    shd = OE("w:shd")
-    shd.set(qn("w:val"), "clear")
-    shd.set(qn("w:color"), "auto")
-    shd.set(qn("w:fill"), "1e3a5f")
-    pPr.append(shd)
-    run = title_p.add_run("INFORMACJA DODATKOWA")
-    run.font.name = "Calibri"
-    run.font.size = Pt(22)
-    run.font.bold = True
-    run.font.color.rgb = WHITE
-    title_p.paragraph_format.space_before = Pt(6)
-    title_p.paragraph_format.space_after  = Pt(6)
+    _add_runs(title_p, "INFORMACJA DODATKOWA",
+              bold=True, color=NAVY, size_pt=22)
+    title_p.paragraph_format.space_before = Pt(24)
+    title_p.paragraph_format.space_after  = Pt(4)
 
-    sub = doc.add_paragraph(f"do sprawozdania finansowego za rok obrotowy {year}")
-    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for r in sub.runs:
-        r.font.size = Pt(13)
-        r.font.color.rgb = BLUE
+    sub1 = doc.add_paragraph()
+    sub1.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _add_runs(sub1, "do sprawozdania finansowego",
+              bold=False, color=BLUE, size_pt=14)
 
-    name_p = doc.add_paragraph(company_name)
-    name_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for r in name_p.runs:
-        r.font.size = Pt(12)
-        r.font.bold = True
-        r.font.color.rgb = NAVY
+    sub2 = doc.add_paragraph()
+    sub2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _add_runs(sub2, f"za rok obrotowy {year}",
+              bold=False, color=BLUE, size_pt=14)
+    sub2.paragraph_format.space_after = Pt(16)
 
-    add_horizontal_rule(doc)
+    # Dane spółki
+    from datetime import datetime
+    dane = {
+        "Jednostka":         company_name,
+        "Okres sprawozdawczy": f"01.01.{year} — 31.12.{year}",
+    }
+    for label, value in dane.items():
+        p = doc.add_paragraph()
+        _add_runs(p, f"{label}: ", bold=False, color=GRAY6, size_pt=10)
+        _add_runs(p, value, bold=True, color=GRAY6, size_pt=10)
+
+    # Data wygenerowania
+    p_date = doc.add_paragraph()
+    _add_runs(p_date, f"Wygenerowano: {datetime.now().strftime('%d.%m.%Y')}",
+              bold=False, color=GRAY9, size_pt=9)
+    p_date.paragraph_format.space_before = Pt(8)
+
     doc.add_page_break()
 
-    # ── Parsowanie treści z grupowaniem tabel ─────────────────────────────────
+    # ── TREŚĆ ─────────────────────────────────────────────────────────────
     lines = generated_text.split("\n")
     i = 0
     while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
+        line  = lines[i]
+        strip = line.strip()
 
-        # Pusta linia
-        if not stripped:
+        if not strip:
             i += 1
             continue
 
-        # Tabela Markdown — zbierz wszystkie wiersze tabeli
-        if stripped.startswith("|"):
-            table_lines = []
+        # Tabela Markdown
+        if strip.startswith("|"):
+            tbl = []
             while i < len(lines) and lines[i].strip().startswith("|"):
-                table_lines.append(lines[i].strip())
+                tbl.append(lines[i].strip())
                 i += 1
-            _render_markdown_table(doc, table_lines)
+            _render_md_table(doc, tbl)
             continue
 
         # Nagłówki
-        if stripped.startswith("#### "):
-            h = doc.add_heading(stripped[5:], level=4)
-            h.paragraph_format.space_before = Pt(6)
-        elif stripped.startswith("### "):
-            h = doc.add_heading(stripped[4:], level=3)
+        if strip.startswith("#### "):
+            h = doc.add_heading(strip[5:], level=4)
             for r in h.runs:
-                r.font.color.rgb = BLUE
-            h.paragraph_format.space_before = Pt(10)
-        elif stripped.startswith("## "):
-            h = doc.add_heading(stripped[3:], level=2)
-            for r in h.runs:
-                r.font.bold = True
-                r.font.color.rgb = NAVY
-            h.paragraph_format.space_before = Pt(14)
-        elif stripped.startswith("# "):
-            h = doc.add_heading(stripped[2:], level=1)
-            for r in h.runs:
-                r.font.color.rgb = NAVY
-            h.paragraph_format.space_before = Pt(16)
+                r.font.name = "Calibri"
+        elif strip.startswith("### "):
+            doc.add_heading(strip[4:], level=3)
+        elif strip.startswith("## "):
+            doc.add_heading(strip[3:], level=2)
+        elif strip.startswith("# "):
+            doc.add_heading(strip[2:], level=1)
 
         # Linia pozioma
-        elif stripped.startswith("---"):
+        elif strip.startswith("---"):
             add_horizontal_rule(doc)
 
-        # Lista punktowana
-        elif stripped.startswith("- ") or stripped.startswith("* "):
-            p = _add_paragraph_with_runs(doc, stripped[2:], style="List Bullet")
-            p.paragraph_format.space_before = Pt(2)
-            p.paragraph_format.space_after  = Pt(2)
+        # Lista
+        elif strip.startswith("- ") or strip.startswith("* "):
+            _add_inline_text(doc, strip[2:], style="List Bullet")
 
-        # Lista numerowana
-        elif re.match(r"^\d+\.\s", stripped):
-            p = _add_paragraph_with_runs(doc, stripped, style="List Number")
+        elif re.match(r"^\d+\.\s", strip):
+            _add_inline_text(doc, strip, style="List Number")
 
         # Zwykły tekst
         else:
-            p = _add_paragraph_with_runs(doc, stripped)
-            p.paragraph_format.space_before = Pt(3)
-            p.paragraph_format.space_after  = Pt(3)
+            _add_inline_text(doc, strip)
 
         i += 1
 
-    # ── Stopka ────────────────────────────────────────────────────────────────
+    # ── STOPKA ────────────────────────────────────────────────────────────
     add_horizontal_rule(doc)
-    footer_p = doc.add_paragraph(
+    foot = doc.add_paragraph(
         f"Informacja Dodatkowa | {company_name} | Rok {year}"
     )
-    footer_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for r in footer_p.runs:
-        r.font.size = Pt(8)
-        r.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+    foot.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for r in foot.runs:
+        r.font.name  = "Calibri"
+        r.font.size  = Pt(8)
+        r.font.color.rgb = GRAY9
 
-    # ── Zapis ─────────────────────────────────────────────────────────────────
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    return buffer.getvalue()
+    # ── ZAPIS ─────────────────────────────────────────────────────────────
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
+
+def _sanitize_text(text: str) -> str:
+    """Usuwa znaki kontrolne i NULL które są niezgodne z XML/docx."""
+    import unicodedata
+    result = []
+    for ch in text:
+        cp = ord(ch)
+        # Dozwolone: tab (9), LF (10), CR (13), oraz znaki >= 32
+        if cp in (9, 10, 13) or cp >= 32:
+            # Dodatkowo wyklucz surrogaty i znaki specjalne XML
+            cat = unicodedata.category(ch)
+            if cat != "Cs":  # Cs = surrogate
+                result.append(ch)
+    return "".join(result)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GŁÓWNY INTERFEJS STREAMLIT
@@ -1536,7 +1575,9 @@ elif _get_state() == "generating":
 
         # Zapis do Word
         status_text.info("💾 Generowanie pliku Word...")
-        docx_bytes = save_to_word(generated_text, company_name, fiscal_year)
+        docx_bytes = save_to_word(
+            _sanitize_text(generated_text), company_name, fiscal_year
+        )
 
         st.session_state["generated_text"] = generated_text
         st.session_state["docx_bytes"] = docx_bytes
