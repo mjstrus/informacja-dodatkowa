@@ -1575,9 +1575,17 @@ elif _get_state() == "generating":
 
         # Zapis do Word
         status_text.info("💾 Generowanie pliku Word...")
-        docx_bytes = save_to_word(
-            _sanitize_text(generated_text), company_name, fiscal_year
-        )
+        try:
+            docx_bytes = save_to_word(
+                _sanitize_text(generated_text), company_name, fiscal_year
+            )
+        except Exception as docx_err:
+            import traceback
+            st.error(f"❌ Błąd zapisu Word: {docx_err}")
+            st.code(traceback.format_exc())
+            st.text_area("Wygenerowany tekst (do wklejenia ręcznego):",
+                         generated_text, height=400)
+            st.stop()
 
         st.session_state["generated_text"] = generated_text
         st.session_state["docx_bytes"] = docx_bytes
