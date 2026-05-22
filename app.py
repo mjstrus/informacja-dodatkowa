@@ -832,92 +832,257 @@ def add_horizontal_rule(doc: Document):
     pPr.append(pBdr)
 
 
+# ─── KOLORY DOKUMENTU ────────────────────────────────────────────────────────
+NAVY  = RGBColor(0x1e, 0x3a, 0x5f)
+BLUE  = RGBColor(0x2d, 0x6a, 0x9f)
+GOLD  = RGBColor(0xC9, 0xA2, 0x27)
+GRAY  = RGBColor(0xF2, 0xF2, 0xF2)
+WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+DARK  = RGBColor(0x22, 0x22, 0x22)
+
+
+def _set_cell_bg(cell, color_hex: str):
+    """Ustawia kolor tła komórki tabeli."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), color_hex)
+    tcPr.append(shd)
+
+
+def _add_paragraph_with_runs(doc, line: str, style=None):
+    """Dodaje akapit z obsługą **bold** i *italic* w tekście."""
+    p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
+    parts = re.split(r"(\*\*[^*]+\*\*|\*[^*]+\*)", line)
+    for part in parts:
+        if part.startswith("**") and part.endswith("**"):
+            run = p.add_run(part[2:-2])
+            run.bold = True
+            run.font.color.rgb = DARK
+        elif part.startswith("*") and part.endswith("*"):
+            run = p.add_run(part[1:-1])
+            run.italic = True
+        else:
+            run = p.add_run(part)
+            run.font.color.rgb = DARK
+    return p
+
+
+def _render_markdown_table(doc, table_lines: list):
+    """Renderuje tabelę Markdown jako profesjonalną tabelę Word."""
+    # Filtruj linie separatora (|---|---|)
+    data_lines = [l for l in table_lines
+                  if not re.match(r"^\|[\s\-:|]+\|", l)]
+    if not data_lines:
+        return
+
+    rows = []
+    for line in data_lines:
+        # Podziel po | i oczyść
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        rows.append(cells)
+
+    if not rows:
+        return
+
+    ncols = max(len(r) for r in rows)
+    # Wyrównaj liczbę kolumn
+    rows = [r + [""] * (ncols - len(r)) for r in rows]
+
+    # Oblicz szerokości kolumn (łącznie ~9000 DXA dla A4 z marginesami 1.2")
+    total_width = 9000
+    col_width = total_width // ncols
+
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+
+    table = doc.add_table(rows=len(rows), cols=ncols)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.style = "Table Grid"
+
+    for ri, row_data in enumerate(rows):
+        row = table.rows[ri]
+        is_header = (ri == 0)
+        for ci, cell_text in enumerate(row_data):
+            cell = row.cells[ci]
+            # Szerokość komórki
+            cell.width = Pt(col_width)
+
+            # Kolor nagłówka
+            if is_header:
+                _set_cell_bg(cell, "1e3a5f")
+            elif ri % 2 == 0:
+                _set_cell_bg(cell, "EBF3FB")
+
+            # Usuń bold markdown z tekstu komórki
+            clean = re.sub(r"\*\*([^*]+)\*\*", r"", cell_text)
+
+            p = cell.paragraphs[0]
+            p.clear()
+            run = p.add_run(clean)
+            run.font.name = "Calibri"
+            run.font.size = Pt(9)
+            if is_header:
+                run.font.bold = True
+                run.font.color.rgb = WHITE
+            else:
+                run.font.color.rgb = DARK
+
+            # Wyrównanie liczb do prawej
+            if re.search(r"\d", clean) and not is_header:
+                p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            elif is_header:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+            # Marginesy komórki
+            tcPr = cell._tc.get_or_add_tcPr()
+            tcMar = OxmlElement("w:tcMar")
+            for side in ["top", "bottom", "left", "right"]:
+                el = OxmlElement(f"w:{side}")
+                el.set(qn("w:w"), "80")
+                el.set(qn("w:type"), "dxa")
+                tcMar.append(el)
+            tcPr.append(tcMar)
+
+    doc.add_paragraph()  # odstęp po tabeli
+
+
 def save_to_word(generated_text: str, company_name: str, year: int) -> bytes:
     """
-    Konwertuje wygenerowaną treść AI na sformatowany plik .docx.
+    Konwertuje wygenerowaną treść AI na profesjonalny plik .docx
+    z pełną obsługą tabel Markdown, nagłówków i formatowania.
     """
     doc = Document()
 
-    # Style
+    # ── Style globalne ────────────────────────────────────────────────────────
     style = doc.styles["Normal"]
     style.font.name = "Calibri"
     style.font.size = Pt(11)
+    style.font.color.rgb = DARK
 
-    # Marginesy
+    # ── Marginesy A4 ─────────────────────────────────────────────────────────
     for section in doc.sections:
-        section.left_margin = Inches(1.2)
-        section.right_margin = Inches(1.2)
-        section.top_margin = Inches(1.0)
-        section.bottom_margin = Inches(1.0)
+        section.left_margin  = Inches(1.18)  # ~3 cm
+        section.right_margin = Inches(1.18)
+        section.top_margin   = Inches(0.98)  # ~2.5 cm
+        section.bottom_margin = Inches(0.98)
 
-    # Strona tytułowa
-    title = doc.add_heading("INFORMACJA DODATKOWA", 0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for run in title.runs:
-        run.font.color.rgb = RGBColor(0x1e, 0x3a, 0x5f)
-        run.font.size = Pt(18)
+    # ── Strona tytułowa ───────────────────────────────────────────────────────
+    # Nagłówek z tłem
+    title_p = doc.add_paragraph()
+    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    pPr = title_p._p.get_or_add_pPr()
+    from docx.oxml import OxmlElement as OE
+    from docx.oxml.ns import qn
+    shd = OE("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), "1e3a5f")
+    pPr.append(shd)
+    run = title_p.add_run("INFORMACJA DODATKOWA")
+    run.font.name = "Calibri"
+    run.font.size = Pt(22)
+    run.font.bold = True
+    run.font.color.rgb = WHITE
+    title_p.paragraph_format.space_before = Pt(6)
+    title_p.paragraph_format.space_after  = Pt(6)
 
-    subtitle = doc.add_paragraph(f"do sprawozdania finansowego za rok obrotowy {year}")
-    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for run in subtitle.runs:
-        run.font.size = Pt(13)
-        run.font.color.rgb = RGBColor(0x2d, 0x6a, 0x9f)
+    sub = doc.add_paragraph(f"do sprawozdania finansowego za rok obrotowy {year}")
+    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for r in sub.runs:
+        r.font.size = Pt(13)
+        r.font.color.rgb = BLUE
 
-    doc.add_paragraph(f"Jednostka: {company_name}").alignment = WD_ALIGN_PARAGRAPH.CENTER
+    name_p = doc.add_paragraph(company_name)
+    name_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for r in name_p.runs:
+        r.font.size = Pt(12)
+        r.font.bold = True
+        r.font.color.rgb = NAVY
+
     add_horizontal_rule(doc)
     doc.add_page_break()
 
-    # Parsowanie i formatowanie treści
+    # ── Parsowanie treści z grupowaniem tabel ─────────────────────────────────
     lines = generated_text.split("\n")
-    for line in lines:
-        line = line.strip()
-        if not line:
-            doc.add_paragraph()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Pusta linia
+        if not stripped:
+            i += 1
             continue
 
-        # Nagłówki markdown
-        if line.startswith("#### "):
-            h = doc.add_heading(line[5:], level=4)
-        elif line.startswith("### "):
-            h = doc.add_heading(line[4:], level=3)
-        elif line.startswith("## "):
-            h = doc.add_heading(line[3:], level=2)
-            for run in h.runs:
-                run.font.color.rgb = RGBColor(0x1e, 0x3a, 0x5f)
-        elif line.startswith("# "):
-            h = doc.add_heading(line[2:], level=1)
-            for run in h.runs:
-                run.font.color.rgb = RGBColor(0x1e, 0x3a, 0x5f)
-        elif line.startswith("**") and line.endswith("**"):
-            p = doc.add_paragraph()
-            run = p.add_run(line.strip("*"))
-            run.bold = True
-        elif line.startswith("- ") or line.startswith("* "):
-            doc.add_paragraph(line[2:], style="List Bullet")
-        elif re.match(r"^\d+\.\s", line):
-            doc.add_paragraph(line, style="List Number")
-        else:
-            # Obsługa **bold** w środku tekstu
-            p = doc.add_paragraph()
-            parts = re.split(r"(\*\*[^*]+\*\*)", line)
-            for part in parts:
-                if part.startswith("**") and part.endswith("**"):
-                    run = p.add_run(part[2:-2])
-                    run.bold = True
-                else:
-                    p.add_run(part)
+        # Tabela Markdown — zbierz wszystkie wiersze tabeli
+        if stripped.startswith("|"):
+            table_lines = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+            _render_markdown_table(doc, table_lines)
+            continue
 
-    # Stopka
+        # Nagłówki
+        if stripped.startswith("#### "):
+            h = doc.add_heading(stripped[5:], level=4)
+            h.paragraph_format.space_before = Pt(6)
+        elif stripped.startswith("### "):
+            h = doc.add_heading(stripped[4:], level=3)
+            for r in h.runs:
+                r.font.color.rgb = BLUE
+            h.paragraph_format.space_before = Pt(10)
+        elif stripped.startswith("## "):
+            h = doc.add_heading(stripped[3:], level=2)
+            for r in h.runs:
+                r.font.bold = True
+                r.font.color.rgb = NAVY
+            h.paragraph_format.space_before = Pt(14)
+        elif stripped.startswith("# "):
+            h = doc.add_heading(stripped[2:], level=1)
+            for r in h.runs:
+                r.font.color.rgb = NAVY
+            h.paragraph_format.space_before = Pt(16)
+
+        # Linia pozioma
+        elif stripped.startswith("---"):
+            add_horizontal_rule(doc)
+
+        # Lista punktowana
+        elif stripped.startswith("- ") or stripped.startswith("* "):
+            p = _add_paragraph_with_runs(doc, stripped[2:], style="List Bullet")
+            p.paragraph_format.space_before = Pt(2)
+            p.paragraph_format.space_after  = Pt(2)
+
+        # Lista numerowana
+        elif re.match(r"^\d+\.\s", stripped):
+            p = _add_paragraph_with_runs(doc, stripped, style="List Number")
+
+        # Zwykły tekst
+        else:
+            p = _add_paragraph_with_runs(doc, stripped)
+            p.paragraph_format.space_before = Pt(3)
+            p.paragraph_format.space_after  = Pt(3)
+
+        i += 1
+
+    # ── Stopka ────────────────────────────────────────────────────────────────
     add_horizontal_rule(doc)
     footer_p = doc.add_paragraph(
-        f"Dokument wygenerowany automatycznie | {company_name} | Rok {year}"
+        f"Informacja Dodatkowa | {company_name} | Rok {year}"
     )
     footer_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for run in footer_p.runs:
-        run.font.size = Pt(9)
-        run.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+    for r in footer_p.runs:
+        r.font.size = Pt(8)
+        r.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
 
-    # Zapis do bufora
+    # ── Zapis ─────────────────────────────────────────────────────────────────
     buffer = io.BytesIO()
     doc.save(buffer)
     return buffer.getvalue()
