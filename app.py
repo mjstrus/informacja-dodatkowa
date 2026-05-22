@@ -944,6 +944,11 @@ st.divider()
 run_disabled = not (anthropic_key and uploaded_files and company_name)
 if st.button("🚀 Generuj Informację Dodatkową", type="primary",
               disabled=run_disabled, use_container_width=True):
+    st.session_state["trigger_generate"] = True
+    st.session_state.pop("missing_confirmed", None)
+    st.session_state.pop("polityka_answers", None)
+
+if st.session_state.get("trigger_generate"):
 
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -1187,6 +1192,7 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
         st.session_state["docx_bytes"] = docx_bytes
         progress_bar.progress(100)
         status_text.success("✅ Informacja Dodatkowa wygenerowana pomyślnie!")
+        st.session_state.pop("trigger_generate", None)
 
         # ── Podgląd i pobieranie ────────────────────────────────────────────
         with results_container:
@@ -1206,10 +1212,13 @@ if st.button("🚀 Generuj Informację Dodatkową", type="primary",
                 st.markdown(generated_text)
 
     except anthropic.AuthenticationError:
+        st.session_state.pop("trigger_generate", None)
         st.error("❌ Nieprawidłowy klucz API Anthropic. Sprawdź wartość w panelu bocznym.")
     except anthropic.RateLimitError:
+        st.session_state.pop("trigger_generate", None)
         st.error("❌ Przekroczono limit zapytań API. Poczekaj chwilę i spróbuj ponownie.")
     except Exception as e:
+        st.session_state.pop("trigger_generate", None)
         st.error(f"❌ Błąd: {e}")
         st.exception(e)
 
