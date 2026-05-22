@@ -937,7 +937,8 @@ def _render_md_table(doc, table_lines: list):
             _cell_margins(cell, 80)
 
             # Tekst — usuń bold markdown
-            clean = re.sub(r"\*\*([^*]+)\*\*", r"", raw_text)
+            clean = re.sub(r"[*][*]([^*]+)[*][*]", r"\1", raw_text)
+            clean = "".join(ch for ch in clean if ord(ch) >= 32 or ord(ch) in (9,10,13))
             is_bold_md = "**" in raw_text
 
             p = cell.paragraphs[0]
