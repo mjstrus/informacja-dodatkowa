@@ -938,24 +938,50 @@ with col2:
     elif not company_name:
         st.warning("⚠️ Wprowadź nazwę spółki w panelu bocznym.")
 
-# ── Przycisk uruchomienia ────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# MASZYNA STANÓW GENEROWANIA
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Stany (session_state["app_state"]):
+#   "idle"            → czeka na kliknięcie Generuj
+#   "parsing"         → parsuje PDF i mapuje dokumenty
+#   "confirm_missing" → pyta o brakujące dokumenty
+#   "polityka"        → pyta o zasady rachunkowości
+#   "generating"      → wywołuje Claude i zapisuje docx
+#   "done"            → pokazuje wyniki
+#   "error"           → pokazuje błąd
+#
+# Zasada: st.rerun() zawsze wraca do TEGO bloku który
+# sprawdza stan i wykonuje właściwy krok.
+# ═══════════════════════════════════════════════════════════════════════════════
+
 st.divider()
 
+def _reset_state():
+    """Resetuje maszynę stanów do początku."""
+    for key in ["app_state", "parsed_docs", "doc_mapping", "missing_docs",
+                "polityka_answers", "generated_text", "docx_bytes"]:
+        st.session_state.pop(key, None)
+
+def _set_state(state: str):
+    st.session_state["app_state"] = state
+
+def _get_state() -> str:
+    return st.session_state.get("app_state", "idle")
+
+# ── Przycisk Generuj ─────────────────────────────────────────────────────────
 run_disabled = not (anthropic_key and uploaded_files and company_name)
 if st.button("🚀 Generuj Informację Dodatkową", type="primary",
-              disabled=run_disabled, use_container_width=True):
-    st.session_state["trigger_generate"] = True
-    st.session_state.pop("missing_confirmed", None)
-    st.session_state.pop("polityka_answers", None)
+             disabled=run_disabled, use_container_width=True):
+    _reset_state()
+    _set_state("parsing")
+    st.rerun()
 
-if st.session_state.get("trigger_generate"):
-
+# ── STAN: parsing ─────────────────────────────────────────────────────────────
+if _get_state() == "parsing":
     progress_bar = st.progress(0)
     status_text = st.empty()
-    results_container = st.container()
-
     try:
-        # ── KROK 1: Parsowanie ──────────────────────────────────────────────
         status_text.info("📄 Krok 1/4: Parsowanie dokumentów PDF...")
         progress_bar.progress(10)
 
@@ -968,206 +994,175 @@ if st.session_state.get("trigger_generate"):
         else:
             parsed = parse_documents_fallback(uploaded_files, update_progress)
 
-        progress_bar.progress(30)
-        st.session_state["parsed_docs"] = parsed
-
-        # ── KROK 2: Mapowanie ───────────────────────────────────────────────
-        status_text.info("🗂️ Krok 2/4: Mapowanie i identyfikacja dokumentów...")
+        status_text.info("🗂️ Krok 2/4: Mapowanie dokumentów...")
         progress_bar.progress(40)
         doc_mapping = map_documents(parsed)
+
+        st.session_state["parsed_docs"] = parsed
         st.session_state["doc_mapping"] = doc_mapping
 
-        # ── SPRAWDZENIE BRAKUJĄCYCH DOKUMENTÓW ─────────────────────────────
         missing = check_missing_documents(doc_mapping)
-        if missing and not st.session_state.get("missing_confirmed"):
-            progress_bar.empty()
-            status_text.empty()
+        st.session_state["missing_docs"] = missing
 
-            st.warning("⚠️ Nie znaleziono wszystkich dokumentów w wgranych plikach.")
-            st.markdown("**Brakujące dokumenty:**")
-            for dt in missing:
-                info_dt = REQUIRED_DOC_TYPES[dt]
-                st.markdown(f"- {info_dt['icon']} **{info_dt['label']}** — {info_dt['desc']}")
+        if missing:
+            _set_state("confirm_missing")
+        else:
+            _set_state("polityka")
 
-            st.markdown("---")
-            st.markdown("**Co chcesz zrobić?**")
+        progress_bar.empty()
+        status_text.empty()
+        st.rerun()
 
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("▶️ Kontynuuj bez brakujących dokumentów",
-                              use_container_width=True, type="primary",
-                              key="btn_continue_missing"):
-                    st.session_state["missing_confirmed"] = True
-                    st.rerun()
-            with col_b:
-                if st.button("📁 Anuluj — chcę dodać brakujące pliki",
-                              use_container_width=True,
-                              key="btn_cancel_missing"):
-                    st.session_state.pop("parsed_docs", None)
-                    st.session_state.pop("doc_mapping", None)
-                    st.info("Wgraj brakujące pliki i uruchom ponownie.")
-                    st.stop()
+    except Exception as e:
+        progress_bar.empty()
+        status_text.empty()
+        _set_state("error")
+        st.session_state["error_msg"] = str(e)
+        st.rerun()
 
-            st.info(
-                "💡 Wskazówka: Jeśli plik zawiera kilka dokumentów w jednym PDF "
-                "(np. Bilans + RZiS razem), aplikacja może nie rozpoznać drugiego. "
-                "Spróbuj wgrać je jako osobne pliki."
+# ── STAN: confirm_missing ─────────────────────────────────────────────────────
+elif _get_state() == "confirm_missing":
+    missing = st.session_state.get("missing_docs", [])
+    doc_mapping = st.session_state.get("doc_mapping", {})
+
+    # Pokaż raport mapowania
+    st.subheader("📋 Rozpoznane dokumenty")
+    cols = st.columns(max(len(doc_mapping), 1))
+    for i, (fname, ddata) in enumerate(doc_mapping.items()):
+        with cols[i % len(cols)]:
+            st.markdown(f"""<div class="metric-box">
+                <b>{ddata['type']}</b><br>
+                <small>{fname}</small>
+            </div>""", unsafe_allow_html=True)
+
+    st.warning("⚠️ Nie znaleziono wszystkich dokumentów w wgranych plikach.")
+    st.markdown("**Brakujące dokumenty:**")
+    for dt in missing:
+        info_dt = REQUIRED_DOC_TYPES[dt]
+        st.markdown(f"- {info_dt['icon']} **{info_dt['label']}** — {info_dt['desc']}")
+
+    st.info("💡 Jeśli plik zawiera kilka dokumentów w jednym PDF — spróbuj wgrać je jako osobne pliki.")
+    st.markdown("---")
+    st.markdown("**Co chcesz zrobić?**")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("▶️ Kontynuuj bez brakujących dokumentów",
+                     use_container_width=True, type="primary"):
+            _set_state("polityka")
+            st.rerun()
+    with col_b:
+        if st.button("📁 Anuluj — chcę dodać brakujące pliki",
+                     use_container_width=True):
+            _reset_state()
+            st.rerun()
+
+# ── STAN: polityka ────────────────────────────────────────────────────────────
+elif _get_state() == "polityka":
+    doc_mapping = st.session_state.get("doc_mapping", {})
+    types_found = {d["type"] for d in doc_mapping.values()}
+
+    if "POLITYKA RACHUNKOWOŚCI" not in types_found:
+        st.warning("📜 Nie załączono dokumentu **Polityki Rachunkowości**. Wypełnij poniższe pytania.")
+
+        with st.form("polityka_form"):
+            st.subheader("📋 Zasady rachunkowości — pytania uzupełniające")
+
+            q1 = st.selectbox("1. Zasady ustalania wyniku finansowego:", options=[
+                "Wariant porównawczy (układ rodzajowy kosztów)",
+                "Wariant kalkulacyjny (układ funkcjonalny kosztów)",
+            ])
+            q2_wycena = st.selectbox("2a. Metoda wyceny zapasów:", options=[
+                "FIFO (pierwsze weszło, pierwsze wyszło)",
+                "LIFO (ostatnie weszło, pierwsze wyszło)",
+                "Cena przeciętna (średnia ważona)",
+                "Ceny ewidencyjne z odchyleniami",
+                "Nie dotyczy (brak zapasów)",
+            ])
+            q2_st = st.selectbox("2b. Metoda amortyzacji środków trwałych:", options=[
+                "Liniowa (równomierne odpisy przez cały okres)",
+                "Degresywna (przyspieszone odpisy na początku)",
+                "Jednorazowy odpis (niskocenne ST do 10 000 zł)",
+                "Mieszana (liniowa i jednorazowa)",
+            ])
+            q2_nal = st.selectbox("2c. Wycena należności:", options=[
+                "W wartości nominalnej z odpisami aktualizującymi",
+                "W wartości nominalnej bez odpisów aktualizujących",
+                "W wartości godziwej",
+            ])
+            q3 = st.selectbox("3. Sposób sporządzania sprawozdania finansowego:", options=[
+                "Pełne sprawozdanie finansowe (standardowe)",
+                "Uproszczone sprawozdanie finansowe (art. 46 ust. 5 UoR — jednostki małe)",
+                "Sprawozdanie według Załącznika nr 4 UoR (mikro jednostki)",
+                "Sprawozdanie według Załącznika nr 5 UoR (małe jednostki NGO)",
+            ])
+            q4_podatek = st.checkbox(
+                "Jednostka tworzy rezerwę i aktywa z tytułu odroczonego podatku dochodowego",
+                value=True
             )
-            st.stop()
+            q5_leasing = st.selectbox("Ujęcie leasingu:", options=[
+                "Według UoR (leasing operacyjny/finansowy wg ekonomicznej treści)",
+                "Leasing operacyjny — wszystkie umowy traktowane jako operacyjny",
+                "Nie dotyczy (brak umów leasingowych)",
+            ])
+            uwagi = st.text_area("Dodatkowe uwagi (opcjonalnie):", height=80)
 
-        # Wyczyść flagę po użyciu
-        st.session_state.pop("missing_confirmed", None)
+            if st.form_submit_button("✅ Zatwierdź i generuj", use_container_width=True, type="primary"):
+                st.session_state["polityka_answers"] = {
+                    "wynik_finansowy": q1, "wycena_zapasow": q2_wycena,
+                    "amortyzacja": q2_st, "wycena_naleznosci": q2_nal,
+                    "sposob_sprawozdania": q3, "podatek_odroczony": q4_podatek,
+                    "leasing": q5_leasing, "uwagi": uwagi,
+                }
+                _set_state("generating")
+                st.rerun()
+    else:
+        st.session_state["polityka_answers"] = {}
+        _set_state("generating")
+        st.rerun()
 
-        # (kontynuuj normalnie — użytkownik potwierdził lub brak braków)
+# ── STAN: generating ──────────────────────────────────────────────────────────
+elif _get_state() == "generating":
+    doc_mapping = st.session_state.get("doc_mapping", {})
+    polityka_answers = st.session_state.get("polityka_answers", {})
 
-        # ── PYTANIA O POLITYKĘ RACHUNKOWOŚCI (gdy brak dokumentu) ──────────
-        types_found = {d["type"] for d in doc_mapping.values()}
-        if "POLITYKA RACHUNKOWOŚCI" not in types_found:
-            # Sprawdź czy pytania już zostały wypełnione
-            if not st.session_state.get("polityka_answers"):
-                progress_bar.empty()
-                status_text.empty()
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    results_container = st.container()
 
-                st.warning(
-                    "📜 Nie załączono dokumentu **Polityki Rachunkowości**. "
-                    "Odpowiedz na poniższe pytania — zostaną one wykorzystane "
-                    "przy sporządzaniu sekcji 1.2–1.5 Informacji Dodatkowej."
-                )
-
-                with st.form("polityka_form"):
-                    st.subheader("📋 Zasady rachunkowości — pytania uzupełniające")
-
-                    q1 = st.selectbox(
-                        "1. Zasady ustalania wyniku finansowego:",
-                        options=[
-                            "Wariant porównawczy (układ rodzajowy kosztów)",
-                            "Wariant kalkulacyjny (układ funkcjonalny kosztów)",
-                        ],
-                        help="Dotyczy formy Rachunku Zysków i Strat (art. 47 UoR)"
-                    )
-
-                    q2_wycena = st.selectbox(
-                        "2a. Metoda wyceny zapasów:",
-                        options=[
-                            "FIFO (pierwsze weszło, pierwsze wyszło)",
-                            "LIFO (ostatnie weszło, pierwsze wyszło)",
-                            "Cena przeciętna (średnia ważona)",
-                            "Ceny ewidencyjne z odchyleniami",
-                            "Nie dotyczy (brak zapasów)",
-                        ]
-                    )
-
-                    q2_st = st.selectbox(
-                        "2b. Metoda amortyzacji środków trwałych:",
-                        options=[
-                            "Liniowa (równomierne odpisy przez cały okres)",
-                            "Degresywna (przyspieszone odpisy na początku)",
-                            "Jednorazowy odpis (niskocenne ST do 10 000 zł)",
-                            "Mieszana (liniowa i jednorazowa)",
-                        ]
-                    )
-
-                    q2_nal = st.selectbox(
-                        "2c. Wycena należności:",
-                        options=[
-                            "W wartości nominalnej z odpisami aktualizującymi",
-                            "W wartości nominalnej bez odpisów aktualizujących",
-                            "W wartości godziwej",
-                        ]
-                    )
-
-                    q3 = st.selectbox(
-                        "3. Sposób sporządzania sprawozdania finansowego:",
-                        options=[
-                            "Pełne sprawozdanie finansowe (standardowe)",
-                            "Uproszczone sprawozdanie finansowe (art. 46 ust. 5 UoR — jednostki małe)",
-                            "Sprawozdanie według Załącznika nr 4 UoR (mikro jednostki)",
-                            "Sprawozdanie według Załącznika nr 5 UoR (małe jednostki NGO)",
-                        ],
-                        help="Jednostki małe mogą stosować uproszczenia zgodnie z art. 46–50 UoR"
-                    )
-
-                    q4_podatek = st.checkbox(
-                        "Jednostka tworzy rezerwę i aktywa z tytułu odroczonego podatku dochodowego",
-                        value=True
-                    )
-
-                    q5_leasing = st.selectbox(
-                        "Ujęcie leasingu:",
-                        options=[
-                            "Według UoR (leasing operacyjny/finansowy wg ekonomicznej treści)",
-                            "Leasing operacyjny — wszystkie umowy traktowane jako operacyjny",
-                            "Nie dotyczy (brak umów leasingowych)",
-                        ]
-                    )
-
-                    uwagi = st.text_area(
-                        "Dodatkowe uwagi dotyczące polityki rachunkowości (opcjonalnie):",
-                        placeholder="np. szczególne zasady wyceny, zmiany polityki w roku obrotowym...",
-                        height=80
-                    )
-
-                    submitted = st.form_submit_button(
-                        "✅ Zatwierdź i kontynuuj generowanie",
-                        use_container_width=True, type="primary"
-                    )
-
-                if submitted:
-                    st.session_state["polityka_answers"] = {
-                        "wynik_finansowy": q1,
-                        "wycena_zapasow": q2_wycena,
-                        "amortyzacja": q2_st,
-                        "wycena_naleznosci": q2_nal,
-                        "sposob_sprawozdania": q3,
-                        "podatek_odroczony": q4_podatek,
-                        "leasing": q5_leasing,
-                        "uwagi": uwagi,
-                    }
-                    st.rerun()
-                else:
-                    st.stop()
-
-        # Pobierz odpowiedzi na pytania (jeśli były zadane)
-        polityka_answers = st.session_state.get("polityka_answers", {})
-
-        # ── KROK 3: Walidacja ───────────────────────────────────────────────
+    try:
+        # Walidacja
         status_text.info("✅ Krok 3/4: Walidacja spójności danych...")
         progress_bar.progress(55)
         validation_issues = validate_data_consistency(doc_mapping)
 
         with results_container:
             st.subheader("📋 Raport mapowania i walidacji")
-            map_cols = st.columns(len(doc_mapping))
+            map_cols = st.columns(max(len(doc_mapping), 1))
             for i, (fname, ddata) in enumerate(doc_mapping.items()):
-                with map_cols[i]:
-                    st.markdown(f"""
-                    <div class="metric-box">
+                with map_cols[i % len(map_cols)]:
+                    st.markdown(f"""<div class="metric-box">
                         <b>{ddata['type']}</b><br>
                         <small>{fname}</small><br>
                         <small>{ddata['length']:,} znaków</small>
                     </div>""", unsafe_allow_html=True)
 
             st.subheader("🔎 Walidacja danych")
+            css = {"OK": "validation-ok", "WARN": "validation-warn", "ERR": "validation-err"}
             for issue in validation_issues:
-                css = {"OK": "validation-ok", "WARN": "validation-warn", "ERR": "validation-err"}
                 st.markdown(f'<span class="{css.get(issue["level"], "")}">{issue["msg"]}</span>',
                             unsafe_allow_html=True)
 
-        # ── KROK 4: Generowanie ─────────────────────────────────────────────
-        status_text.info("🤖 Krok 4/4: Generowanie przez Claude 3.5 Sonnet (może potrwać 1-2 min)...")
+        # Generowanie przez Claude
+        status_text.info("🤖 Krok 4/4: Generowanie przez Claude 3.5 Sonnet...")
         progress_bar.progress(65)
 
         company_info = {
-            "nazwa": company_name,
-            "siedziba": company_siedziba,
-            "nip": company_nip,
-            "krs": company_krs,
-            "regon": company_regon,
-            "pkd": company_pkd,
-            "data_rejestracji": company_data_rej,
-            "forma_prawna": company_forma,
-            "okres_od": str(okres_od),
-            "okres_do": str(okres_do),
+            "nazwa": company_name, "siedziba": company_siedziba,
+            "nip": company_nip, "krs": company_krs,
+            "regon": company_regon, "pkd": company_pkd,
+            "data_rejestracji": company_data_rej, "forma_prawna": company_forma,
+            "okres_od": str(okres_od), "okres_do": str(okres_do),
             "zagrozenie_kontynuacji": zagrozenie_kontynuacji,
             "zagrozenie_opis": zagrozenie_opis,
             "polityka_answers": polityka_answers,
@@ -1175,6 +1170,7 @@ if st.session_state.get("trigger_generate"):
             "zatrudnienie_poprzedni": zatrudnienie_poprzedni,
             "zatrudnienie_uwagi": zatrudnienie_uwagi,
         }
+
         generated_text = generate_accounting_notes(
             doc_mapping=doc_mapping,
             anthropic_api_key=anthropic_key,
@@ -1183,54 +1179,54 @@ if st.session_state.get("trigger_generate"):
             company_info=company_info,
             progress_callback=lambda v, m: progress_bar.progress(int(65 + v * 20))
         )
-        st.session_state["generated_text"] = generated_text
-        progress_bar.progress(88)
 
-        # ── KROK 5: Eksport do Word ─────────────────────────────────────────
+        # Zapis do Word
         status_text.info("💾 Generowanie pliku Word...")
         docx_bytes = save_to_word(generated_text, company_name, fiscal_year)
+
+        st.session_state["generated_text"] = generated_text
         st.session_state["docx_bytes"] = docx_bytes
         progress_bar.progress(100)
         status_text.success("✅ Informacja Dodatkowa wygenerowana pomyślnie!")
-        st.session_state.pop("trigger_generate", None)
-
-        # ── Podgląd i pobieranie ────────────────────────────────────────────
-        with results_container:
-            st.divider()
-            dl_col, _ = st.columns([1, 2])
-            with dl_col:
-                st.download_button(
-                    label="⬇️ Pobierz Informację Dodatkową (.docx)",
-                    data=docx_bytes,
-                    file_name=f"informacja_dodatkowa_{company_name.replace(' ', '_')}_{fiscal_year}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    type="primary",
-                    use_container_width=True
-                )
-
-            with st.expander("👁️ Podgląd wygenerowanej treści", expanded=True):
-                st.markdown(generated_text)
+        _set_state("done")
+        st.rerun()
 
     except anthropic.AuthenticationError:
-        st.session_state.pop("trigger_generate", None)
-        st.error("❌ Nieprawidłowy klucz API Anthropic. Sprawdź wartość w panelu bocznym.")
+        _set_state("error")
+        st.session_state["error_msg"] = "Nieprawidłowy klucz API Anthropic."
+        st.rerun()
     except anthropic.RateLimitError:
-        st.session_state.pop("trigger_generate", None)
-        st.error("❌ Przekroczono limit zapytań API. Poczekaj chwilę i spróbuj ponownie.")
+        _set_state("error")
+        st.session_state["error_msg"] = "Przekroczono limit zapytań API. Poczekaj chwilę."
+        st.rerun()
     except Exception as e:
-        st.session_state.pop("trigger_generate", None)
-        st.error(f"❌ Błąd: {e}")
-        st.exception(e)
+        _set_state("error")
+        st.session_state["error_msg"] = str(e)
+        st.rerun()
 
-# ── Jeśli wyniki już są w sesji ──────────────────────────────────────────────
-elif "generated_text" in st.session_state:
-    st.info("📝 Wyniki z poprzedniego uruchomienia (wgraj nowe pliki lub wciśnij Generuj ponownie).")
-    if st.session_state.get("docx_bytes"):
+# ── STAN: done ────────────────────────────────────────────────────────────────
+elif _get_state() == "done":
+    st.success("✅ Informacja Dodatkowa wygenerowana pomyślnie!")
+
+    dl_col, _ = st.columns([1, 2])
+    with dl_col:
         st.download_button(
-            label="⬇️ Pobierz poprzedni wynik (.docx)",
+            label="⬇️ Pobierz Informację Dodatkową (.docx)",
             data=st.session_state["docx_bytes"],
-            file_name=f"informacja_dodatkowa_{fiscal_year}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            file_name=f"informacja_dodatkowa_{company_name.replace(' ', '_')}_{fiscal_year}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            type="primary", use_container_width=True
         )
-    with st.expander("👁️ Poprzednio wygenerowana treść"):
+    if st.button("🔄 Generuj dla innej spółki", use_container_width=True):
+        _reset_state()
+        st.rerun()
+
+    with st.expander("👁️ Podgląd wygenerowanej treści", expanded=True):
         st.markdown(st.session_state["generated_text"])
+
+# ── STAN: error ───────────────────────────────────────────────────────────────
+elif _get_state() == "error":
+    st.error(f"❌ Błąd: {st.session_state.get('error_msg', 'Nieznany błąd')}")
+    if st.button("🔄 Spróbuj ponownie"):
+        _reset_state()
+        st.rerun()
