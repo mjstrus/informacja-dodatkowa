@@ -14,6 +14,7 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 import base64
@@ -514,7 +515,7 @@ def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
         f"REGON: {info.get('regon','')}",
         f"PKD: {info.get('pkd','')}",
         f"DATA REJESTRACJI: {info.get('data_rejestracji','')}",
-        f"OKRES: od {info.get('okres_od','')} do {info.get('okres_od','')}",
+        f"OKRES: od {info.get('okres_od','')} do {info.get('okres_do','')}",
         f"ZATRUDNIENIE bieżący rok: {info.get('zatrudnienie_biezacy',0)} etatów",
         f"ZATRUDNIENIE poprzedni rok: {info.get('zatrudnienie_poprzedni',0)} etatów",
         f"UWAGI ZATRUDNIENIE: {info.get('zatrudnienie_uwagi','')}",
@@ -580,16 +581,48 @@ def _parse_chart_data(generated_text: str) -> dict | None:
         return None
 
 
+def _setup_ax(ax, title: str, labels_f, year_suffix: str = ""):
+    """Wspólna konfiguracja osi wykresu — styl jednolity w całym dokumencie."""
+    ax.set_title(f"{title}{year_suffix}", fontsize=13, fontweight="bold",
+                 color="#1B2A4A", pad=12, fontfamily=FONT_NAME)
+    ax.set_xticks(np.arange(len(labels_f)))
+    ax.set_xticklabels(labels_f, fontsize=9, fontfamily=FONT_NAME)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(_fmt_pln))
+    ax.tick_params(axis="y", labelsize=8)
+    ax.grid(axis="y", color=GRID_COLOR, linewidth=0.8, zorder=0)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(GRID_COLOR)
+
+
+def _bar_labels(ax, bars, fontsize=7.5):
+    """Dodaje etykiety wartości na słupkach."""
+    for bar in bars:
+        h = bar.get_height()
+        if h != 0:
+            ax.text(bar.get_x() + bar.get_width()/2, h,
+                    _fmt_pln(h), ha="center", va="bottom",
+                    fontsize=fontsize, color="#333333", fontfamily=FONT_NAME)
+
+
+def _save_fig(fig) -> bytes:
+    """Zapisuje figurę matplotlib do bytes PNG."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 def _make_bar_chart(title: str, labels: list, values_prev: list,
-                    values_curr: list, year: int) -> bytes:
-    """Tworzy wykres słupkowy porównawczy i zwraca PNG jako bytes."""
-    # Filtruj pozycje gdzie OBA lata = 0
+                    values_curr: list, year: int):
+    """Wykres słupkowy porównawczy (dwa lata)."""
     pairs = [(l, p, c) for l, p, c in zip(labels, values_prev, values_curr)
              if p != 0 or c != 0]
     if not pairs:
         return None
     labels_f, prev_f, curr_f = zip(*pairs)
-
     x = np.arange(len(labels_f))
     width = 0.38
 
@@ -602,37 +635,15 @@ def _make_bar_chart(title: str, labels: list, values_prev: list,
     bars_c = ax.bar(x + width/2, curr_f, width, color=BAR_COLORS_CURR,
                     label=str(year), zorder=3)
 
-    ax.set_title(title, fontsize=13, fontweight="bold", color="#1B2A4A",
-                 pad=12, fontfamily=FONT_NAME)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels_f, fontsize=9, fontfamily=FONT_NAME)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(_fmt_pln))
-    ax.tick_params(axis="y", labelsize=8)
-    ax.grid(axis="y", color=GRID_COLOR, linewidth=0.8, zorder=0)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_color(GRID_COLOR)
-    ax.spines["bottom"].set_color(GRID_COLOR)
+    _setup_ax(ax, title, labels_f)
     ax.legend(fontsize=9, framealpha=0)
-
-    # Etykiety wartości na słupkach
-    for bar in list(bars_p) + list(bars_c):
-        h = bar.get_height()
-        if h != 0:
-            ax.text(bar.get_x() + bar.get_width()/2, h,
-                    _fmt_pln(h), ha="center", va="bottom",
-                    fontsize=7.5, color="#333333", fontfamily=FONT_NAME)
-
+    _bar_labels(ax, list(bars_p) + list(bars_c), fontsize=7.5)
     plt.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
+    return _save_fig(fig)
 
 
-def _make_single_bar_chart(title: str, labels: list, values: list, year: int) -> bytes:
-    """Wykres słupkowy dla jednego roku (np. struktura pasywów)."""
+def _make_single_bar_chart(title: str, labels: list, values: list, year: int):
+    """Wykres słupkowy dla jednego roku."""
     pairs = [(l, v) for l, v in zip(labels, values) if v != 0]
     if not pairs:
         return None
@@ -642,34 +653,11 @@ def _make_single_bar_chart(title: str, labels: list, values: list, year: int) ->
     fig.patch.set_facecolor("white")
     ax.set_facecolor("white")
 
-    x = np.arange(len(labels_f))
-    bars = ax.bar(x, vals_f, color=BAR_SINGLE, zorder=3, width=0.5)
-
-    ax.set_title(f"{title} ({year})", fontsize=13, fontweight="bold",
-                 color="#1B2A4A", pad=12, fontfamily=FONT_NAME)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels_f, fontsize=9, fontfamily=FONT_NAME)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(_fmt_pln))
-    ax.tick_params(axis="y", labelsize=8)
-    ax.grid(axis="y", color=GRID_COLOR, linewidth=0.8, zorder=0)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_color(GRID_COLOR)
-    ax.spines["bottom"].set_color(GRID_COLOR)
-
-    for bar in bars:
-        h = bar.get_height()
-        if h != 0:
-            ax.text(bar.get_x() + bar.get_width()/2, h,
-                    _fmt_pln(h), ha="center", va="bottom",
-                    fontsize=8, color="#333333", fontfamily=FONT_NAME)
-
+    bars = ax.bar(np.arange(len(labels_f)), vals_f, color=BAR_SINGLE, zorder=3, width=0.5)
+    _setup_ax(ax, title, labels_f, year_suffix=f" ({year})")
+    _bar_labels(ax, bars, fontsize=8)
     plt.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
+    return _save_fig(fig)
 
 
 def build_charts(chart_data: dict, year: int) -> list[tuple[str, bytes]]:
@@ -791,7 +779,6 @@ def _add_inline_text(doc, line, style=None):
 
 
 def _render_md_table(doc, table_lines):
-    from docx.enum.table import WD_TABLE_ALIGNMENT
     rows_raw = [l for l in table_lines
                 if not re.match(r"^\|[\s\-:|]+\|$", l.strip())]
     if not rows_raw:
