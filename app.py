@@ -433,6 +433,7 @@ REQUIRED_DOC_TYPES = {
         "icon": "🏗️",
         "desc": "Wartość brutto, umorzenia i wartość netto środków trwałych",
         "keywords": ["środki trwałe", "wartość brutto", "umorzenie", "odpisy amortyzacyjne"],
+        "required": False,
     },
     "PRZEPŁYWY PIENIĘŻNE": {
         "label": "Rachunek przepływów pieniężnych",
@@ -460,6 +461,7 @@ REQUIRED_DOC_TYPES = {
                      "obroty kont aktywnych", "obroty kont pasywnych",
                      "saldo wn", "saldo ma", "obroty wn", "obroty ma",
                      "bilans otwarcia", "konto", "ob. wn", "ob. ma"],
+        "required": False,
     },
     "ANKIETA BILANSOWA": {
         "label": "Ankieta bilansowa",
