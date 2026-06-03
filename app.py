@@ -606,13 +606,30 @@ def extract_financial_number(text: str, pattern: str) -> float | None:
     return None
 
 
-def validate_data_consistency(doc_mapping: dict) -> list:
+def validate_data_consistency(doc_mapping: dict, company_nip: str = "") -> list:
     """
     Krok 3: Sprawdza spójność danych między dokumentami.
     Zwraca listę komunikatów walidacji.
     """
     issues = []
     all_text = "\n".join(d["text"] for d in doc_mapping.values())
+
+    # ── Weryfikacja NIP — czy dokumenty należą do tej firmy ──────────────
+    if company_nip:
+        nip_clean = re.sub(r"\D", "", company_nip)
+        for filename, doc_data in doc_mapping.items():
+            # Wyciągnij NIP z nagłówka dokumentu Symfonii (pierwsze 500 znaków)
+            header = doc_data["text"][:500]
+            nips_in_doc = re.findall(r"NIP[:\s]+(\d[\d\s\-]{8,11}\d)", header, re.IGNORECASE)
+            for nip_raw in nips_in_doc:
+                nip_found = re.sub(r"\D", "", nip_raw)
+                if len(nip_found) == 10 and nip_found != nip_clean:
+                    issues.append({
+                        "level": "ERR",
+                        "msg": f"❌ UWAGA: Plik {filename} zawiera NIP {nip_found} — "
+                               f"niezgodny z NIP spółki ({nip_clean}). "
+                               f"Prawdopodobnie wgrałeś dokument innej firmy!"
+                    })
 
     # Sprawdź sumy bilansowe — obsługa różnych formatów
     # Symfonia: "Suma 1.023.905,39 619.466,88 ..." na końcu bilansu
@@ -836,8 +853,8 @@ STRUKTURA DOKUMENTU (obowiązkowa):
    1.1 Dane identyfikacyjne jednostki (nazwa, forma prawna, siedziba, NIP, KRS, REGON, PKD,
        data rejestracji, okres sprawozdawczy, oświadczenie o kontynuacji działalności,
        STRUKTURA WŁASNOŚCI KAPITAŁU — lista wspólników/udziałowców z KRS z podaniem
-       imienia i nazwiska, roli (komplementariusz/komandytariusz) lub liczby udziałów,
-       wartości wkładu/udziałów. Dane wspólników znajdziesz w sekcji "STRUKTURA WŁASNOŚCI KAPITAŁU")
+       PEŁNEGO imienia i nazwiska (nie anonimizuj, nie maskuj gwiazdkami — podaj jak jest),
+       roli lub liczby udziałów, wartości wkładu/udziałów. Dane w sekcji "STRUKTURA WŁASNOŚCI KAPITAŁU")
    1.2 Zasady (polityka) rachunkowości
    1.3 Metody wyceny aktywów i pasywów
    1.4 Metody amortyzacji i stosowane stawki
@@ -849,6 +866,21 @@ STRUKTURA DOKUMENTU (obowiązkowa):
    - tytułem: "Nota X. [tytuł]"
    - treścią opisową lub TABELĄ MARKDOWN z danymi z dokumentów
    NIE twórz spisu treści. Każda nota musi mieć RZECZYWISTĄ TREŚĆ z liczbami lub opisem.
+
+   OBOWIĄZKOWE NOTY (generuj zawsze jeśli masz RZiS):
+
+   NOTA: KOSZTY RODZAJOWE — tabela porównawcza rok bieżący vs poprzedni:
+   | Pozycja | Rok bieżący (PLN) | Rok poprzedni (PLN) |
+   Pozycje: Amortyzacja, Zużycie materiałów i energii, Usługi obce,
+   Podatki i opłaty, Wynagrodzenia, Ubezpieczenia społeczne i inne świadczenia,
+   Pozostałe koszty rodzajowe, RAZEM koszty rodzajowe.
+   Dane wyciągnij z RZiS — kolumna rok bieżący i kolumna rok poprzedni.
+
+   NOTA: STRUKTURA PRZYCHODÓW — tabela porównawcza rok bieżący vs poprzedni:
+   | Rodzaj przychodów | Rok bieżący (PLN) | Rok poprzedni (PLN) |
+   Pozycje: Przychody netto ze sprzedaży produktów/usług, Przychody ze sprzedaży towarów,
+   Pozostałe przychody operacyjne, Przychody finansowe, RAZEM przychody.
+   Dane wyciągnij z RZiS — kolumna rok bieżący i kolumna rok poprzedni.
 
 STYL: Profesjonalne słownictwo, PLN z dokładnością do groszy, tryb oznajmujący.
 - Tabele generuj w formacie MARKDOWN (| kolumna1 | kolumna2 |)
@@ -930,6 +962,7 @@ Na podstawie powyższych wypełnij sekcje 1.2–1.5.""".format(
     kapital_podst = info.get("kapital_podstawowy", "")
     if wspolnicy or kapital_podst:
         context_parts.append("\n👥 STRUKTURA WŁASNOŚCI KAPITAŁU (z KRS) — WSTAW DO SEKCJI 1.1:")
+        context_parts.append("WAŻNE: Podaj imiona i nazwiska W PEŁNEJ FORMIE. Nie maskuj, nie skracaj, nie zastępuj gwiazdkami.")
         if kapital_podst:
             context_parts.append(f"Kapitał podstawowy: {kapital_podst} PLN")
         for w in wspolnicy:
@@ -1361,8 +1394,9 @@ with st.sidebar:
     # Wspólnicy — edytowalne pola, auto-wypełniane z KRS
     st.divider()
     st.subheader("👥 Wspólnicy / Właściciel")
-    st.caption("Dla spółek — auto-wypełniane z KRS (dane mogą być ocenzurowane, popraw ręcznie). "
-               "Dla JDG / CEIDG — wpisz dane właściciela ręcznie.")
+    st.caption("Dla spółek — auto-wypełniane z KRS. "
+               "Jeśli imiona pokazują się z gwiazdkami (np. R****) — API KRS anonimizuje dane osobowe. "
+               "Sprawdź pełne dane na [prs.ms.gov.pl](https://prs.ms.gov.pl) i wpisz ręcznie.")
 
     krs_wspolnicy = krs.get("wspolnicy", [])
     krs_kapital = krs.get("kapital_podstawowy", "")
@@ -1407,15 +1441,21 @@ with st.sidebar:
                                    value=defaults.get("nazwa", ""),
                                    key=f"wsp_nazwa_{i}")
         with cols[1]:
-            rola = st.text_input(f"Rola / udziały",
-                                  value=defaults.get("rola", ""),
+            # Dla sp. z o.o. rola = liczba udziałów, dla komandytowej = rola
+            rola_val = defaults.get("rola", "")
+            if rola_val and rola_val.isdigit():
+                rola_label = f"Liczba udziałów"
+            else:
+                rola_label = f"Rola / liczba udziałów"
+            rola = st.text_input(rola_label,
+                                  value=rola_val,
                                   key=f"wsp_rola_{i}",
-                                  placeholder="np. 100 udziałów / komandytariusz")
+                                  placeholder="np. 100 lub komandytariusz")
         with cols[2]:
-            wartosc = st.text_input(f"Wartość wkładu / udziałów",
+            wartosc = st.text_input(f"Wartość udziałów / wkładu (PLN)",
                                      value=defaults.get("wartosc", ""),
                                      key=f"wsp_wartosc_{i}",
-                                     placeholder="np. 5 000 PLN")
+                                     placeholder="np. 5 000,00")
         if nazwa:
             wspolnicy_edit.append({"nazwa": nazwa, "rola": rola, "wartosc": wartosc})
 
@@ -1758,7 +1798,7 @@ if st.session_state.get("run_generation") and uploaded_files:
         # ── KROK 3: Walidacja ───────────────────────────────────────────────
         status_text.info("✅ Krok 3/5: Walidacja spójności danych...")
         progress_bar.progress(55)
-        validation_issues = validate_data_consistency(doc_mapping)
+        validation_issues = validate_data_consistency(doc_mapping, company_nip)
 
         with results_container:
             st.subheader("📋 Raport mapowania i walidacji")
