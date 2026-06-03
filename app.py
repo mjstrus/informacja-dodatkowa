@@ -813,8 +813,9 @@ def format_notes_for_prompt(selected_notes: list) -> str:
         for n in prio2:
             lines.append(f"  📌 {n['name']} [GOFIN {n['nr']}]")
     lines.append(
-        "\nJeśli nota ma SAME ZERA lub zjawisko nie wystąpiło — napisz 'Nie dotyczy.'"
-        "\nNIGDY nie pisz '[DANE DO UZUPEŁNIENIA]'. Użyj myślnika '—' w pustych komórkach.\n"
+        "\nZASADA: Generuj TYLKO noty które mają rzeczywistą treść i dane liczbowe."
+        "\nJeśli nota = zera lub nie dotyczy jednostki — POMIŃ JĄ CAŁKOWICIE (bez tytułu, bez 'Nie dotyczy')."
+        "\nNIGDY nie pisz '[DANE DO UZUPEŁNIENIA]'. Myślnik '—' w pustych komórkach tabeli.\n"
     )
     return "\n".join(lines)
 
@@ -851,17 +852,16 @@ STRUKTURA DOKUMENTU (obowiązkowa):
 
 STYL: Profesjonalne słownictwo, PLN z dokładnością do groszy, tryb oznajmujący.
 - Tabele generuj w formacie MARKDOWN (| kolumna1 | kolumna2 |)
-- ZASADA ZEROWYCH WARTOŚCI: Jeśli dla noty WSZYSTKIE wartości = 0, napisz "Nie dotyczy." NIE generuj tabeli.
-- NUMERACJA NOT: Numeruj SEKWENCYJNIE (Nota 1, Nota 2, Nota 3...) NIE używaj numerów GOFIN.
+- ZASADA ZEROWYCH WARTOŚCI: Jeśli dla danej noty WSZYSTKIE wartości = 0 LUB nota nie dotyczy tej jednostki — **POMIŃ JĄ CAŁKOWICIE**. Nie pisz "Nie dotyczy", nie wstawiaj pustej sekcji. Po prostu jej nie generuj i przejdź do następnej noty z treścią.
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  BEZWZGLĘDNY ZAKAZ UŻYWANIA "[DANE DO UZUPEŁNIENIA]"                        ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 NIGDY nie wstawiaj "[DANE DO UZUPEŁNIENIA]". Zamiast tego:
-A) Zjawisko nie wystąpiło → "Nie dotyczy."
+A) Zjawisko nie wystąpiło lub wartości = 0 → POMIŃ notę całkowicie (bez tytułu, bez tekstu)
 B) Masz kwotę łączną bez rozbicia → podaj łączną, puste komórki wypełnij "—"
-C) Brak danych w dokumentach → "Na dzień sporządzenia sprawozdania Spółka nie przedłożyła danych w tym zakresie."
-D) Nota z samymi zerami → "Nie dotyczy."
+C) Brak danych w dokumentach → POMIŃ notę całkowicie
+D) Nota z samymi zerami → POMIŃ notę całkowicie
 
 Jeśli dostarczono Politykę Rachunkowości – sekcja 1.2–1.5 oparta WYŁĄCZNIE na jej treści.
 
@@ -1008,8 +1008,8 @@ Na podstawie powyższych wypełnij sekcje 1.2–1.5.""".format(
 {full_context}
 
 Wygeneruj pełną Informację Dodatkową zgodnie z UoR.
-Gdzie masz dane — użyj konkretnych liczb. Gdzie brakuje — napisz "Nie dotyczy." lub użyj myślnika "—".
-NIGDY nie pisz "[DANE DO UZUPEŁNIENIA]".
+Gdzie masz dane — użyj konkretnych liczb. Gdzie brakuje lub wartość = 0 — POMIŃ notę całkowicie.
+NIGDY nie pisz "[DANE DO UZUPEŁNIENIA]" ani "Nie dotyczy" — po prostu nie generuj tej noty.
 Formatuj nagłówkami i akapitami."""
 
     if progress_callback:
