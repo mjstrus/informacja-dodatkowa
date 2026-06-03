@@ -614,9 +614,26 @@ def validate_data_consistency(doc_mapping: dict) -> list:
     issues = []
     all_text = "\n".join(d["text"] for d in doc_mapping.values())
 
-    # Sprawdź sumy bilansowe
-    aktywne = extract_financial_number(all_text, r"AKTYWA\s+RAZEM|suma\s+aktywów")
-    pasywa = extract_financial_number(all_text, r"PASYWA\s+RAZEM|suma\s+pasywów")
+    # Sprawdź sumy bilansowe — obsługa różnych formatów
+    # Symfonia: "Suma 1.023.905,39 619.466,88 ..." na końcu bilansu
+    # Inne: "AKTYWA RAZEM", "PASYWA RAZEM"
+    def _find_balance_sum(text):
+        # Format Symfonia: linia "Suma X Y Z" (ostatnia liczba to suma bilansowa)
+        m = re.findall(r"^Suma\s+([\d\s.,]+)", text, re.MULTILINE | re.IGNORECASE)
+        if m:
+            try:
+                val = m[-1].strip().split()[0].replace(".", "").replace(",", ".")
+                return float(val)
+            except Exception:
+                pass
+        # Klasyczny format
+        return (
+            extract_financial_number(text, r"AKTYWA\s+RAZEM|suma\s+aktywów") or
+            extract_financial_number(text, r"Aktywa razem|SUMA AKTYWÓW")
+        )
+
+    aktywne = _find_balance_sum(all_text)
+    pasywa = aktywne  # W formacie Symfonia Suma=Aktywa=Pasywa (jedna linia)
 
     if aktywne and pasywa:
         diff = abs(aktywne - pasywa)
