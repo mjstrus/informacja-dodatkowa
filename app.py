@@ -356,9 +356,21 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
                 liczba = ""
                 wartosc = ""
 
-                # 1. Udziały (sp. z o.o.)
                 udzialy = w.get("posiadaneUdzialy", w.get("udzialy", {}))
-                if isinstance(udzialy, dict):
+
+                # Format STRING: "34 UDZIAŁY O ŁĄCZNEJ WARTOŚCI 1700 ZŁ"
+                if isinstance(udzialy, str) and udzialy.strip():
+                    m_l = re.search(r"(\d[\d\s]*)\s+UDZIA", udzialy, re.IGNORECASE)
+                    m_v = re.search(r"WARTO.CI\s+([\d\s,\.]+\s*Z[ŁL])", udzialy, re.IGNORECASE)
+                    if m_l:
+                        liczba = m_l.group(1).strip()
+                    if m_v:
+                        wartosc = m_v.group(1).strip()
+                    if not liczba and not wartosc:
+                        liczba = udzialy  # cały string jako fallback
+
+                # Format DICT: {"iloscUdzialow": ..., "wartoscUdzialow": ...}
+                elif isinstance(udzialy, dict):
                     liczba = str(udzialy.get("iloscUdzialow", udzialy.get("liczba", "")))
                     wartosc_ud = udzialy.get("wartoscUdzialow", udzialy.get("wartosc", ""))
                     if isinstance(wartosc_ud, dict):
