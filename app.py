@@ -1,30 +1,24 @@
 """
 Automatyzator Informacji Dodatkowej do sprawozdania finansowego
-Streamlit app z Claude 3.5 Sonnet + LlamaParse + python-docx
+Streamlit app z Claude API + python-docx
 """
 
 import streamlit as st
 import anthropic
-import os
 import io
 import json
 import re
-import tempfile
-from pathlib import Path
 from docx import Document
-from docx.shared import Pt, Inches, RGBColor, Cm
+from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-import base64
 import requests
-from datetime import date, datetime
+from datetime import date
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
-import numpy as np
+import matplotlib.ticker as ticker
 
 # ─── PAGE CONFIG ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -34,28 +28,40 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ─── STYLES ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .main-header {
         background: linear-gradient(135deg, #1e3a5f 0%, #2d6a9f 100%);
-        color: white; padding: 2rem; border-radius: 12px;
-        margin-bottom: 2rem; text-align: center;
+        color: white;
+        padding: 2rem;
+        border-radius: 12px;
+        margin-bottom: 2rem;
+        text-align: center;
     }
     .step-card {
-        background: #f8f9fa; border-left: 4px solid #2d6a9f;
-        padding: 1rem 1.5rem; border-radius: 0 8px 8px 0; margin: 0.5rem 0;
+        background: #f8f9fa;
+        border-left: 4px solid #2d6a9f;
+        padding: 1rem 1.5rem;
+        border-radius: 0 8px 8px 0;
+        margin: 0.5rem 0;
     }
-    .validation-ok  { color: #28a745; font-weight: bold; }
-    .validation-warn{ color: #ffc107; font-weight: bold; }
+    .validation-ok { color: #28a745; font-weight: bold; }
+    .validation-warn { color: #ffc107; font-weight: bold; }
     .validation-err { color: #dc3545; font-weight: bold; }
     .metric-box {
-        background: white; border: 1px solid #dee2e6; border-radius: 8px;
-        padding: 1rem; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        background: white;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 1rem;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     .stProgress > div > div { background-color: #2d6a9f; }
 </style>
 """, unsafe_allow_html=True)
 
+# ─── HEADER ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="main-header">
     <h1>📊 Generator Informacji Dodatkowej</h1>
@@ -68,6 +74,7 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def extract_text_from_pdf_basic(pdf_bytes: bytes, filename: str) -> str:
+    """Ekstrakcja tekstu z PDF przy użyciu pypdf."""
     try:
         import pypdf
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
@@ -81,74 +88,97 @@ def extract_text_from_pdf_basic(pdf_bytes: bytes, filename: str) -> str:
         return f"[BŁĄD ekstrakcji {filename}: {e}]"
 
 
-def parse_documents_llamaparse(pdf_files, llama_api_key, progress_callback=None):
-    try:
-        from llama_parse import LlamaParse
-        parser = LlamaParse(
-            api_key=llama_api_key, result_type="markdown", language="pl",
-            parsing_instruction=(
-                "Dokument to sprawozdanie finansowe polskiej spółki. "
-                "Zachowaj strukturę tabel finansowych."
-            )
-        )
-        results = {}
-        for idx, f in enumerate(pdf_files):
-            if progress_callback:
-                progress_callback(idx / len(pdf_files), f"Parsowanie: {f.name}")
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                tmp.write(f.getvalue()); tmp_path = tmp.name
-            try:
-                docs = parser.load_data(tmp_path)
-                results[f.name] = "\n\n".join(d.text for d in docs)
-            finally:
-                os.unlink(tmp_path)
-        return results
-    except Exception as e:
-        st.warning(f"⚠️ LlamaParse niedostępny ({e}) — używam pypdf.")
-        return parse_documents_fallback(pdf_files, progress_callback)
-
-
-def parse_documents_fallback(pdf_files, progress_callback=None):
+def parse_documents(pdf_files: list, progress_callback=None) -> dict:
+    """Parsowanie PDF przez pypdf."""
     results = {}
-    for idx, f in enumerate(pdf_files):
+    for idx, uploaded_file in enumerate(pdf_files):
         if progress_callback:
-            progress_callback(idx / len(pdf_files), f"Ekstrakcja: {f.name}")
-        results[f.name] = extract_text_from_pdf_basic(f.getvalue(), f.name)
+            progress_callback(idx / len(pdf_files), f"Ekstrakcja: {uploaded_file.name}")
+        results[uploaded_file.name] = extract_text_from_pdf_basic(
+            uploaded_file.getvalue(), uploaded_file.name
+        )
     return results
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MODUŁ KRS
-# ═══════════════════════════════════════════════════════════════════════════════
+def extract_text_from_docx(docx_bytes: bytes) -> str:
+    """Wyciąga tekst z pliku DOCX (paragraphs + tables)."""
+    from docx import Document as DocxDocument
+    doc = DocxDocument(io.BytesIO(docx_bytes))
+    parts = []
+    for para in doc.paragraphs:
+        if para.text.strip():
+            parts.append(para.text)
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = " | ".join(cell.text.strip() for cell in row.cells)
+            if row_text.strip():
+                parts.append(row_text)
+    return "\n".join(parts)
 
-def fetch_krs_by_krs_nr(krs_nr: str):
+
+def extract_text_from_xlsx(xlsx_bytes: bytes) -> str:
+    """Wyciąga tekst z pliku XLSX (wszystkie arkusze, wiersze jako tekst)."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
+    parts = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows(values_only=True):
+            vals = [str(v).strip() if v is not None else "" for v in row]
+            line = " | ".join(v for v in vals if v)
+            if line.strip():
+                parts.append(line)
+    return "\n".join(parts)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODUŁ KRS: POBIERANIE DANYCH Z OFICJALNEGO API MINISTERSTWA SPRAWIEDLIWOŚCI
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Oficjalne API KRS (api-krs.ms.gov.pl) działa TYLKO po numerze KRS.
+# Endpoint: GET /api/krs/OdpisAktualny/{nrKRS}?rejestr=P&format=json
+# Bezpłatne, bez klucza API.
+
+def fetch_krs_by_krs_nr(krs_nr: str) -> dict | None:
+    """
+    Pobiera dane spółki z oficjalnego API KRS po numerze KRS (10 cyfr).
+    """
     krs_clean = re.sub(r"[^0-9]", "", krs_nr).zfill(10)
     if len(krs_clean) != 10:
         return None
-    headers = {"Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (compatible; InformacjaDodatkowa/1.0)"}
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; InformacjaDodatkowa/1.0)"
+    }
     try:
         url = f"https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/{krs_clean}"
-        for rejestr in ["P", "S"]:
-            r = requests.get(url, params={"rejestr": rejestr, "format": "json"},
-                             headers=headers, timeout=20)
-            if r.status_code == 200:
-                return _parse_odpis(r.json(), krs_clean)
+        r = requests.get(url, params={"rejestr": "P", "format": "json"},
+                         headers=headers, timeout=20)
+        if r.status_code == 200:
+            return _parse_odpis(r.json(), krs_clean)
+        # Spróbuj rejestr S (stowarzyszenia)
+        r2 = requests.get(url, params={"rejestr": "S", "format": "json"},
+                          headers=headers, timeout=20)
+        if r2.status_code == 200:
+            return _parse_odpis(r2.json(), krs_clean)
     except requests.exceptions.ConnectionError:
         raise ConnectionError("Brak połączenia z API KRS")
     except requests.exceptions.Timeout:
-        raise TimeoutError("API KRS nie odpowiada")
+        raise TimeoutError("API KRS nie odpowiada (timeout)")
     except Exception as e:
         raise RuntimeError(f"Błąd API KRS: {e}")
     return None
 
 
-def fetch_krs_by_krs_nr_debug(krs_nr: str):
+def fetch_krs_by_krs_nr_debug(krs_nr: str) -> tuple:
+    """Wersja diagnostyczna — zwraca (dane, log)."""
     import json as _json
     krs_clean = re.sub(r"[^0-9]", "", krs_nr).zfill(10)
     log = [f"Numer KRS po oczyszczeniu: {krs_clean}"]
-    headers = {"Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (compatible; InformacjaDodatkowa/1.0)"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; InformacjaDodatkowa/1.0)"
+    }
     url = f"https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/{krs_clean}"
     for rejestr in ["P", "S"]:
         try:
@@ -158,10 +188,22 @@ def fetch_krs_by_krs_nr_debug(krs_nr: str):
             log.append(f"  Status: {r.status_code}")
             if r.status_code == 200:
                 data = r.json()
-                log.append(f"  Odpowiedź:\n{_json.dumps(data, ensure_ascii=False, indent=2)[:2000]}")
+                preview = _json.dumps(data, ensure_ascii=False, indent=2)[:2000]
+                log.append(f"  Odpowiedź:\n{preview}")
                 parsed = _parse_odpis(data, krs_clean)
                 if parsed:
                     log.append("\n✅ Dane sparsowane pomyślnie")
+                    log.append(f"   Kapitał: {parsed.get('kapital_podstawowy', 'brak')}")
+                    log.append(f"   Wspólnicy znalezieni: {len(parsed.get('wspolnicy', []))}")
+                    for w in parsed.get("wspolnicy", []):
+                        log.append(f"     → {w['nazwa']}: {w['liczba_udzialow']} udz., {w['wartosc_udzialow']} PLN")
+                    # Surowe dane wspólników z API
+                    odpis = data.get("odpis", data)
+                    dzial1 = odpis.get("dane", {}).get("dzial1", {})
+                    for key in dzial1:
+                        if "wspol" in key.lower() or "komplement" in key.lower() or "komandyt" in key.lower():
+                            raw = _json.dumps(dzial1[key], ensure_ascii=False, indent=2)[:3000]
+                            log.append(f"\n   RAW {key}:\n{raw}")
                     return parsed, "\n".join(log)
             else:
                 log.append(f"  Błąd: {r.text[:200]}")
@@ -171,308 +213,644 @@ def fetch_krs_by_krs_nr_debug(krs_nr: str):
     return None, "\n".join(log)
 
 
-def _parse_odpis(data: dict, krs_nr: str = ""):
+def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
+    """Wyciąga potrzebne pola z odpisu JSON zwróconego przez API KRS.
+    Struktura rzeczywista: odpis.dane.dzial1.danePodmiotu / siedzibaIAdres / przedmiotDzialalnosci
+    """
     try:
-        odpis   = data.get("odpis", data)
+        odpis = data.get("odpis", data)
         naglowek = odpis.get("naglowekA", {})
-        dane    = odpis.get("dane", {})
-        dzial1  = dane.get("dzial1", {})
-        dane_p  = dzial1.get("danePodmiotu", {})
-        ident   = dane_p.get("identyfikatory", {})
-        siedz   = dzial1.get("siedzibaIAdres", {}).get("adres", {})
+        dane = odpis.get("dane", {})
+        dzial1 = dane.get("dzial1", {})
+        dane_p = dzial1.get("danePodmiotu", {})
 
-        ulica   = siedz.get("ulica", "").replace("UL. ", "ul. ").replace("UL.", "ul.")
-        nr_domu = siedz.get("nrDomu", "")
-        nr_lok  = siedz.get("nrLokalu", "")
-        kod     = siedz.get("kodPocztowy", "")
-        miasto  = siedz.get("miejscowosc", "")
+        # ── Nazwa ─────────────────────────────────────────────────────────
+        nazwa = dane_p.get("nazwa", "")
+
+        # ── Identyfikatory: NIP i REGON są w osobnym polu ─────────────────
+        ident = dane_p.get("identyfikatory", {})
+        nip_val = ident.get("nip", "")
+        regon_raw = ident.get("regon", "")
+        # REGON może być 14-cyfrowy (z zerami) — przytnij do 9
+        regon_val = regon_raw[:9] if regon_raw else ""
+
+        # ── Forma prawna ──────────────────────────────────────────────────
+        forma = dane_p.get("formaPrawna", "")
+
+        # ── Siedziba i adres są w dzial1.siedzibaIAdres ───────────────────
+        siedz_blok = dzial1.get("siedzibaIAdres", {})
+        adres = siedz_blok.get("adres", {})
+        ulica = adres.get("ulica", "").replace("UL. ", "ul. ").replace("UL.", "ul.")
+        nr_domu = adres.get("nrDomu", "")
+        nr_lok = adres.get("nrLokalu", "")
+        kod = adres.get("kodPocztowy", "")
+        miasto = adres.get("miejscowosc", "")
         siedziba = f"{ulica} {nr_domu}".strip()
         if nr_lok:
             siedziba += f"/{nr_lok}"
         if kod and miasto:
             siedziba += f", {kod} {miasto}"
 
+        # ── Numer KRS z nagłówka ──────────────────────────────────────────
+        krs_val = naglowek.get("numerKRS", krs_nr)
+
+        # ── Data rejestracji ──────────────────────────────────────────────
+        data_rej = naglowek.get("dataRejestracjiWKRS", "")
+
+        # ── PKD — w dzial1.przedmiotDzialalnosci ─────────────────────────
+        # PKD może być w dzial1 lub dzial3 — sprawdzamy oba
         pkd = ""
-        def _wyciagnij_pkd(s):
-            lista = s.get("przedmiotPrzewazajacejDzialalnosci") or s.get("przedmiotDzialalnosci") or []
+        def _wyciagnij_pkd(sekcja):
+            lista = (sekcja.get("przedmiotPrzewazajacejDzialalnosci") or
+                     sekcja.get("przedmiotDzialalnosci") or [])
             if isinstance(lista, list) and lista:
-                p = lista[0]
-                return f"{p.get('kodDzialalnosci','')} {p.get('opis','')}".strip()
+                p0 = lista[0]
+                return f"{p0.get('kodDzialalnosci','')} {p0.get('opis','')}".strip()
             if isinstance(lista, dict):
                 return f"{lista.get('kodDzialalnosci','')} {lista.get('opis','')}".strip()
             return ""
 
-        for k in ["dzial1", "dzial3", "dzial2"]:
-            sec = dane.get(k, {}).get("przedmiotDzialalnosci", {})
-            if sec:
-                pkd = _wyciagnij_pkd(sec)
+        for dzial_key in ["dzial1", "dzial3", "dzial2"]:
+            dzial = dane.get(dzial_key, {})
+            pkd_section = dzial.get("przedmiotDzialalnosci", {})
+            if pkd_section:
+                pkd = _wyciagnij_pkd(pkd_section)
                 if pkd:
                     break
 
-        regon_raw = ident.get("regon", "")
+        # ── Kapitał podstawowy ─────────────────────────────────────────────
+        kapital_blok = dzial1.get("kapital", {})
+        kapital_podstawowy = ""
+        if kapital_blok:
+            kp = kapital_blok.get("wysokoscKapitaluZakladowego", {})
+            if isinstance(kp, dict):
+                kapital_podstawowy = kp.get("wartosc", "")
+            elif isinstance(kp, (str, int, float)):
+                kapital_podstawowy = str(kp)
+
+        # ── Wspólnicy — szukaj w wielu lokalizacjach ──────────────────────
+        wspolnicy = []
+        wspolnicy_raw = None
+        for dk in ["dzial1", "dzial2", "dzial3"]:
+            dz = dane.get(dk, {})
+            for wspol_key in ["wspolnicySpzoo", "wspolnicySpozoo", "wspolnicy",
+                               "wspolnicyPartnerzy", "informacjaOWspolnikach",
+                               "komplementariusze", "komandytariusze",
+                               "wspolnicySpolkiKomandytowej"]:
+                candidate = dz.get(wspol_key)
+                if candidate and isinstance(candidate, list) and len(candidate) > 0:
+                    wspolnicy_raw = candidate
+                    break
+                if isinstance(candidate, dict):
+                    for sub_key in ["wspolnik", "listaWspolnikow", "dane"]:
+                        sub = candidate.get(sub_key)
+                        if isinstance(sub, list) and len(sub) > 0:
+                            wspolnicy_raw = sub
+                            break
+            if wspolnicy_raw:
+                break
+
+        # Fallback: szukaj dowolnego klucza z "wspol"/"komplement"/"komandyt"
+        if not wspolnicy_raw:
+            for dk_key in dzial1.keys():
+                if "komplement" in dk_key.lower() or "komandyt" in dk_key.lower() or "wspol" in dk_key.lower():
+                    candidate = dzial1.get(dk_key)
+                    if isinstance(candidate, list) and len(candidate) > 0:
+                        if wspolnicy_raw is None:
+                            wspolnicy_raw = []
+                        wspolnicy_raw.extend(candidate)
+
+        if wspolnicy_raw and isinstance(wspolnicy_raw, list):
+            for w in wspolnicy_raw:
+                if not isinstance(w, dict):
+                    continue
+
+                # === NAZWA ===
+                nazwa_w = w.get("nazwa", "")
+                if not nazwa_w:
+                    # Imię
+                    imie = w.get("imiona", "")
+                    if isinstance(imie, dict):
+                        imie = imie.get("imie", "")
+                    elif isinstance(imie, list) and imie:
+                        imie = imie[0] if isinstance(imie[0], str) else imie[0].get("imie", "")
+                    if not imie:
+                        imie = w.get("imie", "")
+                    # Nazwisko — może być dict {"nazwiskoICzlon": "KOWALSKI"}
+                    nazwisko = w.get("nazwisko", "")
+                    if isinstance(nazwisko, dict):
+                        nazwisko = nazwisko.get("nazwiskoICzlon", nazwisko.get("nazwisko", ""))
+                    nazwa_w = f"{imie} {nazwisko}".strip()
+
+                if not nazwa_w:
+                    continue
+
+                # === ROLA (komandytowa) ===
+                rola = ""
+                if w.get("czyJestKomandytariuszem") is True:
+                    rola = "komandytariusz"
+                elif w.get("czyJestKomandytariuszem") is False:
+                    rola = "komplementariusz"
+
+                # === WARTOŚĆ ===
+                liczba = ""
+                wartosc = ""
+
+                # 1. Udziały (sp. z o.o.)
+                udzialy = w.get("posiadaneUdzialy", w.get("udzialy", {}))
+                if isinstance(udzialy, dict):
+                    liczba = str(udzialy.get("iloscUdzialow", udzialy.get("liczba", "")))
+                    wartosc_ud = udzialy.get("wartoscUdzialow", udzialy.get("wartosc", ""))
+                    if isinstance(wartosc_ud, dict):
+                        wartosc = wartosc_ud.get("wartosc", "")
+                    elif isinstance(wartosc_ud, (str, int, float)):
+                        wartosc = str(wartosc_ud)
+
+                # 2. Wkład wspólnika (komandytowa) — kilka możliwych pól
+                if not wartosc:
+                    for wklad_key in ["wartoscWkladuWspolnikaWUmowie",
+                                       "wartoscWkladu", "wklad",
+                                       "wysokoscSumyKomandytowej"]:
+                        wv = w.get(wklad_key, "")
+                        if isinstance(wv, dict):
+                            wv = wv.get("wartosc", "")
+                        if isinstance(wv, (str, int, float)) and str(wv).strip():
+                            wartosc = str(wv)
+                            break
+
+                # 3. Wkłady wniesione (lista)
+                if not wartosc:
+                    wklady = w.get("wkladyWniesione", [])
+                    if isinstance(wklady, list) and wklady:
+                        wk0 = wklady[0]
+                        if isinstance(wk0, dict):
+                            wartosc = str(wk0.get("wartosc", ""))
+
+                if not liczba and rola:
+                    liczba = rola
+
+                wspolnicy.append({
+                    "nazwa": nazwa_w,
+                    "liczba_udzialow": str(liczba),
+                    "wartosc_udzialow": str(wartosc),
+                })
+
         return {
-            "nazwa":           dane_p.get("nazwa", ""),
-            "siedziba":        siedziba,
-            "nip":             ident.get("nip", ""),
-            "krs":             naglowek.get("numerKRS", krs_nr),
-            "regon":           regon_raw[:9] if regon_raw else "",
-            "pkd":             pkd,
-            "data_rejestracji": naglowek.get("dataRejestracjiWKRS", ""),
-            "forma_prawna":    dane_p.get("formaPrawna", ""),
+            "nazwa": nazwa,
+            "siedziba": siedziba,
+            "nip": nip_val,
+            "krs": krs_val,
+            "regon": regon_val,
+            "pkd": pkd,
+            "data_rejestracji": data_rej,
+            "forma_prawna": forma,
+            "kapital_podstawowy": str(kapital_podstawowy),
+            "wspolnicy": wspolnicy,
         }
-    except Exception:
+    except Exception as e:
         return None
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# MODUŁ 2: MAPOWANIE DOKUMENTÓW
+# MODUŁ 2: IDENTYFIKACJA I MAPOWANIE DOKUMENTÓW
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Definicja wszystkich obsługiwanych typów dokumentów
 REQUIRED_DOC_TYPES = {
     "BILANS": {
-        "label": "Bilans", "icon": "🏦",
+        "label": "Bilans",
+        "icon": "🏦",
         "desc": "Zestawienie aktywów i pasywów na dzień bilansowy",
         "keywords": ["aktywa trwałe", "aktywa obrotowe", "pasywa", "kapitał własny", "zobowiązania"],
     },
     "RZiS": {
-        "label": "Rachunek Zysków i Strat", "icon": "📈",
+        "label": "Rachunek Zysków i Strat",
+        "icon": "📈",
         "desc": "Przychody, koszty i wynik finansowy za rok obrotowy",
-        "keywords": ["przychody ze sprzedaży", "koszty działalności", "zysk netto", "wynik finansowy"],
+        "keywords": ["przychody ze sprzedaży", "koszty działalności", "zysk netto", "wynik finansowy", "amortyzacja"],
     },
     "ŚRODKI TRWAŁE": {
-        "label": "Tabela środków trwałych", "icon": "🏗️",
+        "label": "Tabela środków trwałych",
+        "icon": "🏗️",
         "desc": "Wartość brutto, umorzenia i wartość netto środków trwałych",
         "keywords": ["środki trwałe", "wartość brutto", "umorzenie", "odpisy amortyzacyjne"],
     },
     "PRZEPŁYWY PIENIĘŻNE": {
-        "label": "Rachunek przepływów pieniężnych", "icon": "💸",
+        "label": "Rachunek przepływów pieniężnych",
+        "icon": "💸",
         "desc": "Cash flow: operacyjny, inwestycyjny, finansowy",
         "keywords": ["przepływy", "działalność operacyjna", "działalność inwestycyjna"],
+        "required": False,
     },
     "POLITYKA RACHUNKOWOŚCI": {
-        "label": "Polityka rachunkowości", "icon": "📜",
+        "label": "Polityka rachunkowości",
+        "icon": "📜",
         "desc": "Przyjęte zasady rachunkowości, metody wyceny, okresy amortyzacji",
-        "keywords": ["polityka rachunkowości", "zasady rachunkowości", "metody wyceny"],
+        "keywords": ["polityka rachunkowości", "zasady rachunkowości", "metody wyceny",
+                     "okres amortyzacji", "przyjęte zasady", "opis przyjętych"],
+        "required": False,
     },
     "ZOiS": {
-        "label": "Zestawienie Obrotów i Sald", "icon": "⚖️",
+        "label": "Zestawienie Obrotów i Sald",
+        "icon": "⚖️",
         "desc": "Obroty i salda kont księgi głównej za rok obrotowy",
         "keywords": ["zestawienie obrotów", "obroty i salda", "salda końcowe",
-                     "konta aktywne", "obroty debetowe", "saldo dt", "saldo ct",
-                     "zestawienie kont", "plan kont", "księga główna"],
+                     "salda otwarcia", "obroty narastająco", "konta syntetyczne",
+                     "księga główna", "salda debetowe", "salda kredytowe",
+                     "obroty kont", "w układzie zois", "zois za miesiąc",
+                     "obroty kont aktywnych", "obroty kont pasywnych",
+                     "saldo wn", "saldo ma", "obroty wn", "obroty ma",
+                     "bilans otwarcia", "konto", "ob. wn", "ob. ma"],
+    },
+    "ANKIETA BILANSOWA": {
+        "label": "Ankieta bilansowa",
+        "icon": "📋",
+        "desc": "Wypełniona ankieta bilansowa od klienta",
+        "keywords": ["ankieta bilansowa", "kwestionariusz", "pytania do klienta",
+                     "kontynuacja działalności", "zdarzenia po dniu bilansowym",
+                     "zobowiązania warunkowe", "podział zysku", "pokrycie straty",
+                     "powiązane", "gwarancji i poręczeń", "pożyczek",
+                     "nakłady", "transakcje", "postępowani",
+                     "sytuacja finansowa jest", "prognoza rozwoju"],
+        "required": False,
     },
 }
 
-HEADER_RULES = [
-    ("ZOiS",                   ["zestawienie obrotów i sald", "obroty i salda", "zois"]),
-    ("BILANS",                  ["bilans na dzień", "bilans jednostki", "aktywa i pasywa"]),
-    ("RZiS",                    ["rachunek zysków i strat", "rachunek wyników", "wynik finansowy netto"]),
-    ("ŚRODKI TRWAŁE",           ["tabela środków trwałych", "środki trwałe i wartości",
-                                  "zestawienie środków trwałych"]),
-    ("POLITYKA RACHUNKOWOŚCI",  ["polityka rachunkowości", "zasady rachunkowości przyjęte"]),
-    ("PRZEPŁYWY PIENIĘŻNE",     ["rachunek przepływów pieniężnych", "cash flow"]),
-]
-
 
 def identify_document_type(text: str) -> str:
-    header = text[:500].lower()
-    for doc_type, phrases in HEADER_RULES:
-        if any(p in header for p in phrases):
-            return doc_type
+    """Heurystyczna identyfikacja typu dokumentu finansowego."""
     text_lower = text.lower()
-    scores = {dt: sum(text_lower.count(kw) for kw in info["keywords"])
-              for dt, info in REQUIRED_DOC_TYPES.items()}
+    scores = {}
+    for doc_type, info in REQUIRED_DOC_TYPES.items():
+        scores[doc_type] = sum(text_lower.count(kw) for kw in info["keywords"])
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else "INNY"
 
 
-def check_missing_documents(doc_mapping: dict) -> list:
+def check_missing_documents(doc_mapping: dict) -> list[str]:
+    """Zwraca listę typów dokumentów których brakuje wśród wgranych plików."""
     types_found = {d["type"] for d in doc_mapping.values()}
-    return [dt for dt in REQUIRED_DOC_TYPES if dt not in types_found]
+    return [dt for dt in REQUIRED_DOC_TYPES
+            if dt not in types_found and REQUIRED_DOC_TYPES[dt].get("required", True)]
 
 
 def map_documents(parsed_docs: dict) -> dict:
-    return {
-        filename: {"type": identify_document_type(text), "text": text, "length": len(text)}
-        for filename, text in parsed_docs.items()
-    }
+    """Mapuje dokumenty do kategorii finansowych."""
+    mapping = {}
+    for filename, text in parsed_docs.items():
+        doc_type = identify_document_type(text)
+        # Preprocessing dla ewidencji ŚT (Symfonia)
+        if doc_type == "ŚRODKI TRWAŁE":
+            text = _preprocess_srodki_trwale(text)
+        mapping[filename] = {
+            "type": doc_type,
+            "text": text,
+            "length": len(text)
+        }
+    return mapping
+
+
+def _preprocess_srodki_trwale(text: str) -> str:
+    """
+    Wyciąga podsumowania GRUP i wiersz RAZEM z ewidencji ŚT (Symfonia).
+    Zwraca czytelną tabelę markdown dołączoną na końcu tekstu.
+    """
+    lines = text.split("\n")
+    groups = []
+    final_razem = None
+
+    for line in lines:
+        line_stripped = line.strip()
+        # Podsumowania GRUP: "GRUPA: _Środki trwałe\07 Środki transportu 2.391.285,76 ..."
+        if line_stripped.startswith("GRUPA:") and re.search(r"\d+[.,]\d+", line_stripped):
+            # Wyciągnij nazwę grupy i liczby
+            name_match = re.search(r"\\(\d{2})\s+(.+?)(?:\s+\d)", line_stripped)
+            if not name_match:
+                name_match = re.search(r"GRUPA:.*?(\d{2})\s+(.+?)(?:\s+\d)", line_stripped)
+            numbers = re.findall(r"[\d]+(?:[.\s]\d{3})*(?:,\d+)?", line_stripped)
+            # Bierzemy ostatnie 6 liczb (zakup, pocz_brutto, kon_brutto, umorzenie_rok, umorzenie_dot, netto)
+            nums = []
+            for n in numbers:
+                cleaned = n.replace(" ", "").replace(".", "").replace(",", ".")
+                try:
+                    nums.append(float(cleaned))
+                except ValueError:
+                    pass
+
+            if len(nums) >= 6:
+                grupa_name = name_match.group(2).strip() if name_match else line_stripped[:50]
+                groups.append({
+                    "name": grupa_name,
+                    "zakup": nums[-6],
+                    "pocz_brutto": nums[-5],
+                    "kon_brutto": nums[-4],
+                    "umorzenie_rok": nums[-3],
+                    "umorzenie_dot": nums[-2],
+                    "netto": nums[-1],
+                })
+
+        # Wiersz "Razem" na ostatniej stronie
+        if line_stripped.startswith("Razem") and "ostatnia" in text[text.find(line_stripped):text.find(line_stripped)+200]:
+            numbers = re.findall(r"[\d]+(?:[.\s]\d{3})*(?:,\d+)?", line_stripped)
+            nums = []
+            for n in numbers:
+                cleaned = n.replace(" ", "").replace(".", "").replace(",", ".")
+                try:
+                    nums.append(float(cleaned))
+                except ValueError:
+                    pass
+            if len(nums) >= 6:
+                final_razem = nums[-6:]
+
+    if not groups and not final_razem:
+        return text
+
+    # Zbuduj czytelną tabelę
+    summary = "\n\n═══ PODSUMOWANIE EWIDENCJI ŚRODKÓW TRWAŁYCH (dane przetworzone) ═══\n"
+    summary += "| Grupa KŚT | Wart. zakupu | Wart. brutto pocz. roku | Wart. brutto kon. roku | Umorzenie za rok | Umorzenie łącznie | Wartość netto |\n"
+    summary += "|---|---|---|---|---|---|---|\n"
+    for g in groups:
+        summary += (
+            f"| {g['name']} | {g['zakup']:,.2f} | {g['pocz_brutto']:,.2f} | "
+            f"{g['kon_brutto']:,.2f} | {g['umorzenie_rok']:,.2f} | {g['umorzenie_dot']:,.2f} | "
+            f"{g['netto']:,.2f} |\n"
+        )
+    if final_razem:
+        summary += (
+            f"| **RAZEM** | **{final_razem[0]:,.2f}** | **{final_razem[1]:,.2f}** | "
+            f"**{final_razem[2]:,.2f}** | **{final_razem[3]:,.2f}** | **{final_razem[4]:,.2f}** | "
+            f"**{final_razem[5]:,.2f}** |\n"
+        )
+    summary += "\nUWAGA: Powyższa tabela zawiera PRAWIDŁOWE wartości z ewidencji ŚT. Użyj ICH do not objaśniających.\n"
+
+    return text + summary
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MODUŁ 3: WALIDACJA
+# MODUŁ 3: WALIDACJA SPÓJNOŚCI DANYCH
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def extract_financial_number(text: str, pattern: str):
+def extract_financial_number(text: str, pattern: str) -> float | None:
+    """Wyciąga liczbę z tekstu na podstawie wzorca."""
     try:
-        matches = re.findall(rf"{pattern}[:\s]+([+-]?\d[\d\s.,]*)", text, re.IGNORECASE)
+        matches = re.findall(
+            rf"{pattern}[:\s]+([+-]?\d[\d\s.,]*)",
+            text, re.IGNORECASE
+        )
         if matches:
-            return float(matches[0].replace(" ", "").replace(",", "."))
+            num_str = matches[0].replace(" ", "").replace(",", ".")
+            return float(num_str)
     except Exception:
         pass
     return None
 
 
 def validate_data_consistency(doc_mapping: dict) -> list:
+    """
+    Krok 3: Sprawdza spójność danych między dokumentami.
+    Zwraca listę komunikatów walidacji.
+    """
     issues = []
     all_text = "\n".join(d["text"] for d in doc_mapping.values())
 
+    # Sprawdź sumy bilansowe
     aktywne = extract_financial_number(all_text, r"AKTYWA\s+RAZEM|suma\s+aktywów")
-    pasywa  = extract_financial_number(all_text, r"PASYWA\s+RAZEM|suma\s+pasywów")
+    pasywa = extract_financial_number(all_text, r"PASYWA\s+RAZEM|suma\s+pasywów")
+
     if aktywne and pasywa:
         diff = abs(aktywne - pasywa)
         if diff < 1:
-            issues.append({"level": "OK",   "msg": f"✅ Bilans zbilansowany: {aktywne:,.0f} PLN"})
+            issues.append({"level": "OK", "msg": f"✅ Bilans zbilansowany: A=P={aktywne:,.0f} PLN"})
         elif diff < aktywne * 0.001:
-            issues.append({"level": "WARN", "msg": f"⚠️ Drobna różnica bilansowa: {diff:,.2f} PLN"})
+            issues.append({"level": "WARN", "msg": f"⚠️ Drobna różnica bilansowa: {diff:,.2f} PLN (prawdopodobnie zaokrąglenia)"})
         else:
-            issues.append({"level": "ERR",  "msg": f"❌ Bilans NIE jest zbilansowany! Różnica: {diff:,.0f} PLN"})
+            issues.append({"level": "ERR", "msg": f"❌ Bilans NIE jest zbilansowany! Różnica: {diff:,.0f} PLN"})
     else:
-        issues.append({"level": "WARN", "msg": "⚠️ Nie znaleziono sum bilansowych"})
+        issues.append({"level": "WARN", "msg": "⚠️ Nie znaleziono sum bilansowych do porównania"})
 
+    # Sprawdź zysk netto
+    zysk_rzis = extract_financial_number(all_text, r"zysk\s+(?:netto|na\s+koniec)")
+    zysk_bilans = extract_financial_number(all_text, r"wynik\s+finansowy\s+netto|zysk.*roku\s+obrotowego")
+    if zysk_rzis and zysk_bilans:
+        diff = abs(zysk_rzis - zysk_bilans)
+        if diff < zysk_rzis * 0.001:
+            issues.append({"level": "OK", "msg": f"✅ Zysk netto spójny: {zysk_rzis:,.0f} PLN"})
+        else:
+            issues.append({"level": "WARN", "msg": f"⚠️ Różnica zysku netto między RZiS a Bilansem: {diff:,.0f} PLN"})
+
+    # Typy dokumentów — sprawdź wszystkie zdefiniowane
     types_found = [d["type"] for d in doc_mapping.values()]
-    for dt, info in REQUIRED_DOC_TYPES.items():
-        lvl = "OK" if dt in types_found else "WARN"
-        msg = f"✅ Znaleziono: {info['icon']} {info['label']}" if dt in types_found \
-              else f"⚠️ Brak: {info['icon']} {info['label']}"
-        issues.append({"level": lvl, "msg": msg})
+    for doc_type, info in REQUIRED_DOC_TYPES.items():
+        if doc_type in types_found:
+            issues.append({"level": "OK", "msg": f"✅ Znaleziono: {info['icon']} {info['label']}"})
+        else:
+            issues.append({"level": "WARN", "msg": f"⚠️ Brak dokumentu: {info['icon']} {info['label']}"}) 
+
     return issues
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MODUŁ 4: GENEROWANIE PRZEZ CLAUDE
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODUŁ 3B: DOBÓR NOT OBJAŚNIAJĄCYCH
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT = """Jesteś biegłym rewidentem i ekspertem ds. rachunkowości polskiej.
-Sporządzasz "Informację Dodatkową" do sprawozdania finansowego zgodnie z UoR.
-
-ZASADA NADRZĘDNA:
-- Generuj TYLKO noty z niezerowymi wartościami wynikającymi z dokumentów
-- Jeśli nota miałaby zawierać same zera lub nie ma danych — POMIJASZ ją całkowicie
-- NIE piszesz tytułu pominiętej noty, NIE piszesz "nie dotyczy", po prostu jej nie ma
-- Gdzie brakuje konkretnych danych szczegółowych (np. podział należności wg terminów) — napisz [DO UZUPEŁNIENIA]
-
-═══════════════════════════════════════════════════════
-CZĘŚĆ 1. WPROWADZENIE
-═══════════════════════════════════════════════════════
-
-1.1 Dane identyfikacyjne — na podstawie danych z panelu (nazwa, forma prawna, siedziba, NIP, KRS, REGON, PKD, data rejestracji, okres sprawozdawczy, kontynuacja działalności)
-1.2 Zasady rachunkowości — podstawa prawna, wariant RZiS, rodzaj sprawozdania, leasing, podatek odroczony
-1.3 Metody wyceny — WNiP, ST, zapasy (FIFO/LIFO/śr.ważona), należności, zobowiązania, waluty obce
-1.4 Amortyzacja — metoda, stawki/okresy dla grup ST i WNiP, próg niskocennych
-1.5 Przychody i koszty — moment ujęcia, rezerwy, RMK
-1.6 Korekty i zmiany polityki — jeśli nie było: jedno zdanie
-
-═══════════════════════════════════════════════════════
-CZĘŚĆ 2. NOTY (tylko z niezerowymi wartościami)
-═══════════════════════════════════════════════════════
-
-Każda nota = tabela Markdown. Pomiń bez komentarza gdy wartości = 0.
-
-AKTYWA TRWAŁE:
-Nota 1  — ST: grupy × (brutto BO, zwiększenia, zmniejszenia, brutto BZ, umorzenie BO, amortyzacja, umorzenie BZ, netto BZ) → gdy ST > 0
-Nota 2  — WNiP: analogiczna struktura → gdy WNiP > 0
-Nota 3  — Inwestycje długoterminowe → gdy > 0
-Nota 4  — Odpisy długoterminowych aktywów niefinansowych → gdy są
-Nota 5  — Odpisy długoterminowych aktywów finansowych → gdy są
-Nota 6  — Koszty prac rozwojowych, wartość firmy → gdy > 0
-Nota 7  — Grunty wieczyste → gdy są
-Nota 32 — Odpisy aktualizujące ST → gdy są
-Nota 38 — Nakłady na niefinansowe aktywa trwałe → gdy są
-
-NALEŻNOŚCI:
-Nota 10 — Odpisy aktualizujące należności: grupy × (BO, zwiększenia, wykorzystanie, uznanie za zbędne, BZ) → gdy odpisy > 0
-Nota 60 — Struktura należności (przeterminowane/nieprzeterminowane) → gdy należności > 0
-Nota 61 — Należności wg terminów (do 30 dni, 31-90, 91-180, >181, >12 mies.) → gdy należności > 0
-
-KAPITAŁY:
-Nota 12 — Kapitał podstawowy sp. z o.o.: wspólnik, wartość udziałów, % → zawsze dla sp. z o.o.
-Nota 11 — Kapitał podstawowy SA/PSA: serie akcji → dla SA i PSA
-Nota 13 — Zmiany kapitału zapasowego i rezerwowego: BO, zwiększenia, zmniejszenia, BZ → gdy ≠ 0
-Nota 14 — Kapitał z aktualizacji wyceny → gdy > 0
-Nota 15 — Podział zysku: zysk netto, wynik lat ubiegłych, razem, proponowany podział → gdy zysk > 0
-Nota 16 — Pokrycie straty → gdy strata
-
-ZOBOWIĄZANIA I REZERWY:
-Nota 17 — Rezerwy: rodzaj × (BO, zwiększenia, wykorzystanie, rozwiązanie, BZ) → gdy > 0
-Nota 18 — Podatek odroczony: aktywa i rezerwy, różnice przejściowe → gdy ≠ 0
-Nota 19 — Zobowiązania wg wymagalności: rodzaje × (do 1 roku, 1-3 lata, 3-5 lat, >5 lat) BO i BZ → gdy > 0
-Nota 20 — Zobowiązania zabezpieczone na majątku → gdy są
-Nota 25 — Zobowiązania warunkowe (poręczenia, gwarancje) → gdy są
-Nota 45 — Zobowiązania emerytalne → gdy są
-Nota 72 — Gwarancje i poręczenia udzielone → gdy są
-Nota 73 — Zobowiązania DT > 5 lat → gdy są
-
-ROZLICZENIA MIĘDZYOKRESOWE:
-Nota 21 — RMK czynne: wyszczególnienie × (BO, zwiększenia, zmniejszenia, BZ) → gdy > 0
-Nota 22 — RMK przychodów → gdy > 0
-
-PRZYCHODY I KOSZTY:
-Nota 29 — Struktura przychodów (kraj/eksport/WDT): wyroby/usługi/towary × rok poprz./bież. → gdy przychody > 0
-Nota 31 — Koszty rodzajowe: amortyzacja, materiały, usługi obce, podatki, wynagrodzenia, ubezpieczenia, pozostałe, razem × (rok poprzedni, rok bieżący) → ZAWSZE gdy RZiS dostępny
-Nota 34 — Działalność zaniechana → gdy była
-Nota 39 — Pozycje nadzwyczajne → gdy są
-
-PODATKI:
-Nota 35 — Rozliczenie CIT: zysk brutto, różnice trwałe, różnice przejściowe, podstawa, podatek należny → gdy CIT > 0
-Nota 59 — Zapłacony CIT: CIT z RZiS, zmiana rezerwy, CIT wg deklaracji, zmiana należności, CIT zapłacony → gdy CIT > 0
-
-ŚRODKI PIENIĘŻNE:
-Nota 41 — Struktura środków: kasa, rachunki × (rok poprz., rok bież., zmiana, ograniczone) → gdy > 0
-Nota 63 — Rachunek VAT (split payment) → gdy są środki
-
-ZATRUDNIENIE I WYNAGRODZENIA:
-Nota 43 — Zatrudnienie: umysłowi, robotnicy, razem × (rok poprz., rok bież.) → gdy > 0
-Nota 44 — Wynagrodzenia organów (zarząd, RN) → gdy były
-Nota 46 — Zaliczki/pożyczki dla organów → gdy były
-
-JEDNOSTKI POWIĄZANE:
-Nota 52 — Zaangażowanie kapitałowe → gdy są udziały w innych spółkach
-Nota 76 — Transakcje z powiązanymi: jednostka × (charakter, należności, zobowiązania, przychody, koszty) → gdy są
-
-═══════════════════════════════════════════════════════
-CZĘŚĆ 3. POZOSTAŁE INFORMACJE
-═══════════════════════════════════════════════════════
-3.1 Zdarzenia po dniu bilansowym
-3.2 Inne istotne informacje
-
-═══════════════════════════════════════════════════════
-CZĘŚĆ 4. DANE DO WYKRESÓW (JSON — OBOWIĄZKOWE)
-═══════════════════════════════════════════════════════
-
-Na końcu odpowiedzi, po wszystkich notach, umieść DOKŁADNIE ten blok JSON
-(wypełniony rzeczywistymi danymi z dokumentów):
-
-```wykres_dane
-{
-  "wynik": {
-    "tytul": "Wynik finansowy",
-    "etykiety": ["Przychody", "Koszty operacyjne", "Zysk/Strata netto"],
-    "rok_poprzedni": [0, 0, 0],
-    "rok_biezacy": [0, 0, 0]
-  },
-  "koszty": {
-    "tytul": "Struktura kosztów rodzajowych",
-    "etykiety": ["Amortyzacja", "Materiały i energia", "Usługi obce", "Wynagrodzenia", "Ubezpieczenia", "Pozostałe"],
-    "rok_poprzedni": [0, 0, 0, 0, 0, 0],
-    "rok_biezacy": [0, 0, 0, 0, 0, 0]
-  },
-  "pasywa": {
-    "tytul": "Struktura pasywów",
-    "etykiety": ["Kapitał własny", "Zobowiązania długoterminowe", "Zobowiązania krótkoterminowe", "RMK"],
-    "rok_biezacy": [0, 0, 0, 0]
-  }
+NOTA_RULES = {
+    1:  {"name": "Zmiana wartości początkowej i umorzenia ŚT", "source": ["ŚRODKI TRWAŁE", "ZOiS"], "category": "auto", "priority": 1},
+    2:  {"name": "Zmiana wartości początkowej i umorzenia WNiP", "source": ["ŚRODKI TRWAŁE", "ZOiS"], "category": "auto", "priority": 1},
+    3:  {"name": "Zmiana wartości inwestycji długoterminowych", "source": ["ZOiS"], "category": "warunkowe", "priority": 2, "zois_keywords": ["inwestycje długoterminowe", "03"]},
+    6:  {"name": "Koszty zakończonych prac rozwojowych oraz wartość firmy", "source": ["ZOiS"], "category": "warunkowe", "priority": 2, "zois_keywords": ["prace rozwojowe", "wartość firmy", "011"]},
+    10: {"name": "Odpisy aktualizujące wartość należności", "source": ["ZOiS"], "category": "auto", "priority": 1, "zois_keywords": ["290", "odpis", "należności"]},
+    12: {"name": "Struktura własności kapitału podstawowego (sp. z o.o.)", "source": [], "category": "auto", "priority": 1, "forma_prawna": ["SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ"]},
+    13: {"name": "Zmiany stanów kapitałów zapasowego i rezerwowego", "source": ["ZOiS", "BILANS"], "category": "auto", "priority": 1},
+    14: {"name": "Zmiany w stanie kapitału z aktualizacji wyceny", "source": ["ZOiS"], "category": "warunkowe", "priority": 2, "zois_keywords": ["803", "aktualizacja wyceny"]},
+    15: {"name": "Propozycja podziału zysku za rok obrotowy", "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 1, "ankieta_trigger": "q6_zysk"},
+    16: {"name": "Propozycja pokrycia straty za rok obrotowy", "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 1, "ankieta_trigger": "q7_strata"},
+    17: {"name": "Rezerwy na koszty i zobowiązania", "source": ["ZOiS", "BILANS"], "category": "auto", "priority": 1},
+    18: {"name": "Odroczony podatek dochodowy", "source": ["ZOiS"], "category": "auto", "priority": 1, "zois_keywords": ["650", "841", "odroczony"]},
+    19: {"name": "Zobowiązania według okresów wymagalności", "source": ["ZOiS", "BILANS"], "category": "auto", "priority": 1},
+    21: {"name": "Czynne rozliczenia międzyokresowe", "source": ["ZOiS"], "category": "auto", "priority": 1, "zois_keywords": ["640", "rozliczenia międzyokresowe"]},
+    22: {"name": "Rozliczenia międzyokresowe przychodów", "source": ["ZOiS"], "category": "warunkowe", "priority": 2, "zois_keywords": ["840", "845", "rozliczenia międzyokresowe przychod"]},
+    29: {"name": "Struktura rzeczowa i terytorialna przychodów", "source": ["RZiS", "ZOiS"], "category": "auto", "priority": 1},
+    31: {"name": "Koszty rodzajowe (porównanie rok bieżący vs poprzedni)", "source": ["RZiS"], "category": "auto", "priority": 1},
+    35: {"name": "Rozliczenie różnicy CIT vs wynik finansowy", "source": ["RZiS", "ZOiS"], "category": "auto", "priority": 1},
+    40: {"name": "Kursy walut przyjęte do wyceny", "source": ["ZOiS"], "category": "warunkowe", "priority": 2, "zois_keywords": ["walut", "kursow", "EUR", "USD", "GBP"]},
+    41: {"name": "Struktura środków pieniężnych", "source": ["ZOiS"], "category": "auto", "priority": 1},
+    57: {"name": "Różnica zobowiązań krótkoterminowych (bilans vs przepływy)", "source": ["BILANS", "PRZEPŁYWY PIENIĘŻNE"], "category": "auto", "priority": 2, "require_all_sources": True},
+    58: {"name": "Różnica zapasów (bilans vs przepływy)", "source": ["BILANS", "PRZEPŁYWY PIENIĘŻNE"], "category": "auto", "priority": 2, "require_all_sources": True},
+    60: {"name": "Struktura należności", "source": ["ZOiS"], "category": "auto", "priority": 1},
+    61: {"name": "Należności według okresów wymagalności", "source": ["ZOiS"], "category": "auto", "priority": 1},
+    63: {"name": "Środki pieniężne na rachunku VAT", "source": ["ZOiS"], "category": "warunkowe", "priority": 2, "zois_keywords": ["VAT", "rachunek VAT"]},
+    73: {"name": "Zobowiązania długoterminowe > 5 lat", "source": ["ZOiS", "BILANS"], "category": "warunkowe", "priority": 2},
+    76: {"name": "Informacje o transakcjach z jednostkami powiązanymi", "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 2, "ankieta_trigger": "q14_powiazane"},
 }
-```
 
-Zastąp zera rzeczywistymi wartościami z dokumentów. Pomiń pozycje z wartością 0 z etykiet.
-Użyj liczb bez spacji i przecinków (np. 311208.30 nie 311 208,30).
+ANKIETA_TRIGGERS = {
+    "q6_zysk": {"positive": ["przeznaczenie zysku", "wypłata dywidendy", "kapitał zapasowy", "podwyższenie kapitału"]},
+    "q7_strata": {"positive": ["pokrycie straty", "zyskiem z lat", "kapitale zapasowym"]},
+    "q14_powiazane": {"question": "transakcje ze stronami powiązanymi", "positive_answer": "tak"},
+}
 
-FORMAT TREŚCI:
-- Nagłówki Markdown (##, ###)
-- Tabele Markdown dla not
-- Liczby: 1 234 567,89 PLN (z separatorem tysięcy, przecinek dziesiętny)
-- NIE pisz "Nie dotyczy", NIE generuj not z samymi zerami, NIE pisz tytułu pominiętej noty
-"""
+
+def _check_ankieta_trigger(trigger_key: str, ankieta_text: str) -> bool:
+    if not ankieta_text:
+        return False
+    trigger = ANKIETA_TRIGGERS.get(trigger_key, {})
+    text_lower = ankieta_text.lower()
+    if "question" in trigger:
+        q_pos = text_lower.find(trigger["question"])
+        if q_pos == -1:
+            return False
+        answer_region = text_lower[q_pos:q_pos + 100]
+        pos_pos = answer_region.find(trigger["positive_answer"])
+        if pos_pos == -1:
+            return False
+        import re as _re
+        nie_matches = list(_re.finditer(r'\bnie\b', answer_region))
+        if nie_matches and nie_matches[0].start() < pos_pos:
+            return False
+        return True
+    if "positive" in trigger:
+        return any(kw in text_lower for kw in trigger["positive"])
+    return False
+
+
+def select_applicable_notes(doc_mapping: dict, company_info: dict = None) -> list:
+    info = company_info or {}
+    types_found = {d["type"] for d in doc_mapping.values()}
+    ankieta_text = ""
+    zois_text = ""
+    for doc_data in doc_mapping.values():
+        if doc_data["type"] == "ANKIETA BILANSOWA":
+            ankieta_text = doc_data["text"]
+        if doc_data["type"] == "ZOiS":
+            zois_text = doc_data["text"].lower()
+
+    selected = []
+    for nota_nr, rule in sorted(NOTA_RULES.items()):
+        reason = ""
+        include = False
+        # Forma prawna check
+        if "forma_prawna" in rule:
+            forma = (info.get("forma_prawna", "") or "").upper()
+            if not any(fp.upper() in forma for fp in rule["forma_prawna"]):
+                continue
+
+        if rule["category"] == "auto":
+            sources = rule.get("source", [])
+            matched = [s for s in sources if s in types_found]
+            if rule.get("require_all_sources"):
+                if len(matched) == len(sources) and sources:
+                    include = True
+                    reason = f"Źródło: {', '.join(matched)}"
+            elif matched:
+                include = True
+                reason = f"Źródło: {', '.join(matched)}"
+            elif not sources:
+                include = True
+                reason = "Nota standardowa"
+        elif rule["category"] == "ankieta":
+            trigger_key = rule.get("ankieta_trigger", "")
+            if ankieta_text and _check_ankieta_trigger(trigger_key, ankieta_text):
+                include = True
+                reason = "Trigger z ankiety bilansowej"
+            elif not ankieta_text and rule["priority"] <= 1:
+                include = True
+                reason = "Brak ankiety — wymagane dane od klienta"
+        elif rule["category"] == "warunkowe":
+            sources = rule.get("source", [])
+            matched = [s for s in sources if s in types_found]
+            if matched:
+                zois_kw = rule.get("zois_keywords", [])
+                if zois_kw and zois_text:
+                    if any(kw.lower() in zois_text for kw in zois_kw):
+                        include = True
+                        reason = f"Wykryto dane w ZOiS"
+                elif not zois_kw:
+                    non_zois = [s for s in matched if s != "ZOiS"]
+                    if non_zois:
+                        include = True
+                        reason = f"Źródło: {', '.join(non_zois)}"
+
+        if include:
+            selected.append({"nr": nota_nr, "name": rule["name"], "category": rule["category"], "priority": rule["priority"], "reason": reason})
+
+    return selected
+
+
+def format_notes_for_prompt(selected_notes: list) -> str:
+    if not selected_notes:
+        return ""
+    prio1 = [n for n in selected_notes if n["priority"] == 1]
+    prio2 = [n for n in selected_notes if n["priority"] == 2]
+    lines = [
+        f"\n📋 NOTY DO WYGENEROWANIA ({len(selected_notes)} not):",
+        "UWAGA: Wygeneruj KAŻDĄ notę poniżej jako pełną sekcję z tytułem i treścią/tabelą.",
+        "ZAKAZ tworzenia samego spisu treści — każda nota musi mieć KONKRETNĄ ZAWARTOŚĆ.",
+        "Numeruj noty SEKWENCYJNIE (Nota 1, Nota 2...). Numery GOFIN w nawiasach to tylko referencja.\n",
+    ]
+    for n in prio1:
+        lines.append(f"  ✅ {n['name']} [GOFIN {n['nr']}]")
+    if prio2:
+        lines.append("\nWAŻNE (jeśli dane wystarczające):")
+        for n in prio2:
+            lines.append(f"  📌 {n['name']} [GOFIN {n['nr']}]")
+    lines.append(
+        "\nJeśli nota ma SAME ZERA lub zjawisko nie wystąpiło — napisz 'Nie dotyczy.'"
+        "\nNIGDY nie pisz '[DANE DO UZUPEŁNIENIA]'. Użyj myślnika '—' w pustych komórkach.\n"
+    )
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODUŁ 4: GENEROWANIE INFORMACJI DODATKOWEJ PRZEZ CLAUDE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SYSTEM_PROMPT = """Jesteś biegłym rewidentem i ekspertem ds. rachunkowości, specjalizującym się w polskim prawie bilansowym.
+Twoim zadaniem jest sporządzenie profesjonalnej "Informacji Dodatkowej" do sprawozdania finansowego.
+
+WYMAGANIA PRAWNE (Ustawa o Rachunkowości):
+- Art. 48 UoR: Informacja dodatkowa obejmuje wprowadzenie i dodatkowe informacje i objaśnienia
+- Stosuj Krajowe Standardy Rachunkowości (KSR)
+
+STRUKTURA DOKUMENTU (obowiązkowa):
+1. WPROWADZENIE DO SPRAWOZDANIA FINANSOWEGO
+   1.1 Dane identyfikacyjne jednostki (nazwa, forma prawna, siedziba, NIP, KRS, REGON, PKD,
+       data rejestracji, okres sprawozdawczy, oświadczenie o kontynuacji działalności,
+       STRUKTURA WŁASNOŚCI KAPITAŁU — lista wspólników/udziałowców z KRS z podaniem
+       imienia i nazwiska, roli (komplementariusz/komandytariusz) lub liczby udziałów,
+       wartości wkładu/udziałów. Dane wspólników znajdziesz w sekcji "STRUKTURA WŁASNOŚCI KAPITAŁU")
+   1.2 Zasady (polityka) rachunkowości
+   1.3 Metody wyceny aktywów i pasywów
+   1.4 Metody amortyzacji i stosowane stawki
+   1.5 Zasady rozliczania przychodów i kosztów
+   1.6 Korekty błędów i zmiany polityki rachunkowości
+
+2. DODATKOWE INFORMACJE I OBJAŚNIENIA
+   Generuj KAŻDĄ notę wymienioną w sekcji "NOTY DO WYGENEROWANIA" jako PEŁNĄ notę z:
+   - tytułem: "Nota X. [tytuł]"
+   - treścią opisową lub TABELĄ MARKDOWN z danymi z dokumentów
+   NIE twórz spisu treści. Każda nota musi mieć RZECZYWISTĄ TREŚĆ z liczbami lub opisem.
+
+STYL: Profesjonalne słownictwo, PLN z dokładnością do groszy, tryb oznajmujący.
+- Tabele generuj w formacie MARKDOWN (| kolumna1 | kolumna2 |)
+- ZASADA ZEROWYCH WARTOŚCI: Jeśli dla noty WSZYSTKIE wartości = 0, napisz "Nie dotyczy." NIE generuj tabeli.
+- NUMERACJA NOT: Numeruj SEKWENCYJNIE (Nota 1, Nota 2, Nota 3...) NIE używaj numerów GOFIN.
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  BEZWZGLĘDNY ZAKAZ UŻYWANIA "[DANE DO UZUPEŁNIENIA]"                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+NIGDY nie wstawiaj "[DANE DO UZUPEŁNIENIA]". Zamiast tego:
+A) Zjawisko nie wystąpiło → "Nie dotyczy."
+B) Masz kwotę łączną bez rozbicia → podaj łączną, puste komórki wypełnij "—"
+C) Brak danych w dokumentach → "Na dzień sporządzenia sprawozdania Spółka nie przedłożyła danych w tym zakresie."
+D) Nota z samymi zerami → "Nie dotyczy."
+
+Jeśli dostarczono Politykę Rachunkowości – sekcja 1.2–1.5 oparta WYŁĄCZNIE na jej treści.
+
+DANE DO WYKRESÓW: Na końcu dokumentu dodaj blok JSON w znacznikach <!--CHART_DATA_START--> i <!--CHART_DATA_END-->:
+<!--CHART_DATA_START-->
+{"aktywa_trwale":0,"aktywa_obrotowe":0,"kapital_wlasny":0,"zobowiazania_dlugoterminowe":0,"zobowiazania_krotkoterminowe":0,"przychody_ze_sprzedazy":0,"koszty_dzialalnosci":0,"wynik_finansowy_netto":0,"srodki_trwale_brutto":0,"srodki_trwale_umorzenie":0,"srodki_trwale_netto":0,"naleznosci_krotkoterminowe":0,"srodki_pieniezne":0,"zapasy":0,"przychody_rok_poprzedni":0,"koszty_rok_poprzedni":0,"wynik_rok_poprzedni":0}
+<!--CHART_DATA_END-->
+Wypełnij TYLKO pola z konkretnymi danymi."""
 
 
 def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
@@ -482,67 +860,145 @@ def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
     client = anthropic.Anthropic(api_key=anthropic_api_key)
     info = company_info or {}
 
-    pa = info.get("polityka_answers", {})
+    # Polityka rachunkowości
     polityka_blok = ""
+    pa = info.get("polityka_answers", {})
     if pa:
-        polityka_blok = (
-            "\n📋 ZASADY RACHUNKOWOŚCI (z ankiety — brak Polityki Rachunkowości):\n"
-            f"- Wynik finansowy: {pa.get('wynik_finansowy','')}\n"
-            f"- Wycena zapasów: {pa.get('wycena_zapasow','')}\n"
-            f"- Amortyzacja ST: {pa.get('amortyzacja','')}\n"
-            f"- Wycena należności: {pa.get('wycena_naleznosci','')}\n"
-            f"- Rodzaj sprawozdania: {pa.get('sposob_sprawozdania','')}\n"
-            f"- Podatek odroczony: {'TAK' if pa.get('podatek_odroczony') else 'NIE'}\n"
-            f"- Leasing: {pa.get('leasing','')}\n"
-            + (f"- Uwagi: {pa['uwagi']}\n" if pa.get("uwagi") else "")
-            + "Wypełnij sekcje 1.2–1.5 na podstawie powyższych danych.\n"
+        polityka_blok = """
+📋 ZASADY RACHUNKOWOŚCI (odpowiedzi użytkownika — brak Polityki Rachunkowości):
+- Zasady ustalania wyniku finansowego: {wynik}
+- Wycena zapasów: {zapasy}
+- Amortyzacja środków trwałych: {amort}
+- Wycena należności: {nal}
+- Sposób sporządzania sprawozdania: {spr}
+- Podatek odroczony: {pod}
+- Ujęcie leasingu: {leas}
+{uwagi_blok}
+Na podstawie powyższych wypełnij sekcje 1.2–1.5.""".format(
+            wynik=pa.get("wynik_finansowy", ""), zapasy=pa.get("wycena_zapasow", ""),
+            amort=pa.get("amortyzacja", ""), nal=pa.get("wycena_naleznosci", ""),
+            spr=pa.get("sposob_sprawozdania", ""),
+            pod="TAK" if pa.get("podatek_odroczony") else "NIE",
+            leas=pa.get("leasing", ""),
+            uwagi_blok=f"- Uwagi: {pa['uwagi']}" if pa.get("uwagi") else ""
         )
 
     zagrozenie_blok = ""
     if info.get("zagrozenie_kontynuacji"):
         zagrozenie_blok = (
-            "\n⚠️ ZAGROŻENIE KONTYNUACJI DZIAŁALNOŚCI (art. 5 ust. 2 UoR).\n"
-            f"Opis: {info.get('zagrozenie_opis','')}\n"
-            "Opisz wpływ na wycenę aktywów i pasywów w sekcji 1.2.\n"
+            "\n⚠️ OKOLICZNOŚCI ZAGROŻENIA KONTYNUOWANIA DZIAŁALNOŚCI (art. 5 ust. 2 UoR). "
+            f"Opis: {info.get('zagrozenie_opis', '')}\n"
         )
 
     context_parts = [
-        f"NAZWA: {info.get('nazwa') or company_name}",
-        f"FORMA PRAWNA: {info.get('forma_prawna','')}",
-        f"SIEDZIBA: {info.get('siedziba','')}",
-        f"NIP: {info.get('nip','')}",
-        f"KRS: {info.get('krs','')}",
-        f"REGON: {info.get('regon','')}",
-        f"PKD: {info.get('pkd','')}",
-        f"DATA REJESTRACJI: {info.get('data_rejestracji','')}",
-        f"OKRES: od {info.get('okres_od','')} do {info.get('okres_do','')}",
-        f"ZATRUDNIENIE bieżący rok: {info.get('zatrudnienie_biezacy',0)} etatów",
-        f"ZATRUDNIENIE poprzedni rok: {info.get('zatrudnienie_poprzedni',0)} etatów",
-        f"UWAGI ZATRUDNIENIE: {info.get('zatrudnienie_uwagi','')}",
+        f"NAZWA JEDNOSTKI: {info.get('nazwa') or company_name}",
+        f"FORMA PRAWNA: {info.get('forma_prawna', '')}",
+        f"SIEDZIBA: {info.get('siedziba', '')}",
+        f"NIP: {info.get('nip', '')}",
+        f"NR KRS: {info.get('krs', '')}",
+        f"REGON: {info.get('regon', '')}",
+        f"GŁÓWNY PKD: {info.get('pkd', '')}",
+        f"DATA REJESTRACJI W KRS: {info.get('data_rejestracji', '')}",
+        f"OKRES SPRAWOZDAWCZY: od {info.get('okres_od', '')} do {info.get('okres_do', '')}",
+        f"ZATRUDNIENIE ŚREDNIE ROK BIEŻĄCY: {info.get('zatrudnienie_biezacy', 0)} etatów",
+        f"ZATRUDNIENIE ŚREDNIE ROK POPRZEDNI: {info.get('zatrudnienie_poprzedni', 0)} etatów",
+        f"UWAGI DO ZATRUDNIENIA: {info.get('zatrudnienie_uwagi', '')}",
         f"ROK OBROTOWY: {year}",
-        polityka_blok, zagrozenie_blok,
-        "=" * 60,
-        "DOKUMENTY FINANSOWE:",
     ]
+
+    # Wspólnicy z KRS
+    wspolnicy = info.get("wspolnicy", [])
+    kapital_podst = info.get("kapital_podstawowy", "")
+    if wspolnicy or kapital_podst:
+        context_parts.append("\n👥 STRUKTURA WŁASNOŚCI KAPITAŁU (z KRS) — WSTAW DO SEKCJI 1.1:")
+        if kapital_podst:
+            context_parts.append(f"Kapitał podstawowy: {kapital_podst} PLN")
+        for w in wspolnicy:
+            l = w.get('liczba_udzialow', '')
+            v = w.get('wartosc_udzialow', '')
+            n = w.get('nazwa', '?')
+            if l in ("komandytariusz", "komplementariusz"):
+                line = f"  - {n} ({l})"
+                if v:
+                    line += f", wkład: {v}"
+                context_parts.append(line)
+            else:
+                context_parts.append(f"  - {n}: {l} udziałów, wartość {v} PLN")
+        context_parts.append(
+            "INSTRUKCJA: Powyższe dane wspólników OBOWIĄZKOWO umieść w sekcji 1.1 "
+            "Dane identyfikacyjne jednostki, w formie tabeli lub listy."
+        )
+
+    # Wynagrodzenie audytora
+    wyn_aud = info.get("wynagrodzenie_audytora", "")
+    if wyn_aud:
+        context_parts.append(f"💰 WYNAGRODZENIE FIRMY AUDYTORSKIEJ: {wyn_aud} PLN")
+
+    context_parts.append(polityka_blok)
+    context_parts.append(zagrozenie_blok)
+    context_parts.append("=" * 60)
+
+    # Lista wybranych not
+    selected_notes = info.get("selected_notes", [])
+    if selected_notes:
+        context_parts.append(format_notes_for_prompt(selected_notes))
+
+    context_parts.append("=" * 60)
+
+    # Ankieta bilansowa
+    ankieta_found = False
     for filename, doc_data in doc_mapping.items():
+        if doc_data["type"] == "ANKIETA BILANSOWA":
+            ankieta_found = True
+            context_parts.append("\n📋 ANKIETA BILANSOWA:")
+            context_parts.append(doc_data["text"][:12000])
+            break
+    if not ankieta_found:
+        context_parts.append(
+            "\n⚠️ BRAK ANKIETY BILANSOWEJ. W sekcjach podziału wyniku, zdarzeń po dniu bilansowym "
+            "— napisz: 'Na dzień sporządzenia sprawozdania Spółka nie przedłożyła danych w tym zakresie.'"
+        )
+
+    # Dokumenty finansowe — ROK BIEŻĄCY
+    context_parts.append("\nWYCIĄGI Z DOKUMENTÓW FINANSOWYCH (ROK BIEŻĄCY):")
+    for filename, doc_data in doc_mapping.items():
+        if doc_data["type"] == "ANKIETA BILANSOWA":
+            continue
         context_parts.append(f"\n[{doc_data['type']}] {filename}:")
         context_parts.append(doc_data["text"][:8000])
         if len(doc_data["text"]) > 8000:
-            context_parts.append("...[skrócono]")
+            context_parts.append("...[tekst skrócony]")
 
-    user_prompt = (
-        f"Sporządź Informację Dodatkową za rok {year}.\n\n"
-        + "\n".join(context_parts)
-        + "\n\nPamiętaj: pomiń noty z zerami, nie pisz ich tytułów. "
-        + "Na końcu umieść blok ```wykres_dane z danymi JSON do wykresów."
-    )
+    # Dokumenty finansowe — ROK POPRZEDNI (z innego źródła)
+    prev_year_docs = info.get("prev_year_docs", {})
+    if prev_year_docs:
+        context_parts.append("\n" + "=" * 60)
+        context_parts.append("📂 DOKUMENTY ZA ROK POPRZEDNI (z innego źródła/biura):")
+        context_parts.append("Użyj ich do kolumn \'rok poprzedni\' w tabelach porównawczych.")
+        context_parts.append("=" * 60)
+        for filename, doc_data in prev_year_docs.items():
+            context_parts.append(f"\n[ROK POPRZEDNI — {doc_data['type']}] {filename}:")
+            context_parts.append(doc_data["text"][:8000])
+            if len(doc_data["text"]) > 8000:
+                context_parts.append("...[tekst skrócony]")
+
+    full_context = "\n".join(context_parts)
+
+    user_prompt = f"""Na podstawie poniższych dokumentów sporządź kompletną "Informację Dodatkową" za rok {year}.
+
+{full_context}
+
+Wygeneruj pełną Informację Dodatkową zgodnie z UoR.
+Gdzie masz dane — użyj konkretnych liczb. Gdzie brakuje — napisz "Nie dotyczy." lub użyj myślnika "—".
+NIGDY nie pisz "[DANE DO UZUPEŁNIENIA]".
+Formatuj nagłówkami i akapitami."""
 
     if progress_callback:
         progress_callback(0.7, "Generowanie przez Claude...")
 
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=8000,
+        max_tokens=16000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}]
     )
@@ -550,440 +1006,261 @@ def generate_accounting_notes(doc_mapping: dict, anthropic_api_key: str,
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MODUŁ 5: WYKRESY SŁUPKOWE
+# MODUŁ 5: EKSPORT DO WORD (.docx) — PROFESJONALNA SZATA + WYKRESY
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Paleta kolorów — jednolita w całym dokumencie
-BAR_COLORS_PREV = "#A8C4E0"   # jasnoniebieski = rok poprzedni
-BAR_COLORS_CURR = "#1B2A4A"   # granat = rok bieżący
-BAR_SINGLE      = "#2D6A9F"   # niebieski = pojedynczy rok
-GRID_COLOR      = "#E5E5E5"
-FONT_NAME       = "DejaVu Sans"
+_CLR_NAVY = RGBColor(0x1B, 0x2A, 0x4A)
+_CLR_BLUE = RGBColor(0x2D, 0x6A, 0x9F)
+_CLR_GRAY = RGBColor(0x66, 0x66, 0x66)
+_CLR_LIGHT = RGBColor(0x99, 0x99, 0x99)
+_CLR_BLACK = RGBColor(0x33, 0x33, 0x33)
+_TBL_HDR = "1B2A4A"
+_TBL_ALT = "F2F6FA"
 
 
-def _fmt_pln(val, _pos=None):
-    """Formatuje oś Y w tysiącach PLN."""
-    if abs(val) >= 1_000_000:
-        return f"{val/1_000_000:.1f} mln"
-    if abs(val) >= 1_000:
-        return f"{val/1_000:.0f} tys."
-    return f"{val:.0f}"
+def _extract_chart_data(text):
+    m = re.search(r"<!--CHART_DATA_START-->\s*(\{.*?\})\s*<!--CHART_DATA_END-->", text, re.DOTALL)
+    if not m: return {}
+    try: return json.loads(m.group(1))
+    except: return {}
 
 
-def _parse_chart_data(generated_text: str) -> dict | None:
-    """Wyciąga blok JSON wykresów z odpowiedzi Claude."""
-    match = re.search(r"```wykres_dane\s*\n(.*?)\n```", generated_text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(1))
-    except Exception:
-        return None
+def _strip_chart_data(text):
+    return re.sub(r"\s*<!--CHART_DATA_START-->.*?<!--CHART_DATA_END-->\s*", "", text, flags=re.DOTALL).strip()
 
 
-def _setup_ax(ax, title: str, labels_f, year_suffix: str = ""):
-    """Wspólna konfiguracja osi wykresu — styl jednolity w całym dokumencie."""
-    ax.set_title(f"{title}{year_suffix}", fontsize=13, fontweight="bold",
-                 color="#1B2A4A", pad=12, fontfamily=FONT_NAME)
-    ax.set_xticks(np.arange(len(labels_f)))
-    ax.set_xticklabels(labels_f, fontsize=9, fontfamily=FONT_NAME)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(_fmt_pln))
-    ax.tick_params(axis="y", labelsize=8)
-    ax.grid(axis="y", color=GRID_COLOR, linewidth=0.8, zorder=0)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    for spine in ("left", "bottom"):
-        ax.spines[spine].set_color(GRID_COLOR)
+def _fmt_pln(v):
+    if abs(v) >= 1_000_000: return f"{v/1_000_000:,.1f} mln"
+    if abs(v) >= 1_000: return f"{v/1_000:,.0f} tys."
+    return f"{v:,.0f}"
+
+def _setup_chart():
+    plt.rcParams.update({"font.family":"sans-serif","font.size":9,"axes.titlesize":11,
+        "axes.titleweight":"bold","axes.spines.top":False,"axes.spines.right":False,
+        "figure.facecolor":"white","figure.dpi":150})
+
+_COLORS = ["#1B2A4A","#2D6A9F","#3A86C8","#6BAED6","#9ECAE1","#C6DBEF"]
 
 
-def _bar_labels(ax, bars, fontsize=7.5):
-    """Dodaje etykiety wartości na słupkach."""
-    for bar in bars:
-        h = bar.get_height()
-        if h != 0:
-            ax.text(bar.get_x() + bar.get_width()/2, h,
-                    _fmt_pln(h), ha="center", va="bottom",
-                    fontsize=fontsize, color="#333333", fontfamily=FONT_NAME)
-
-
-def _save_fig(fig) -> bytes:
-    """Zapisuje figurę matplotlib do bytes PNG."""
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
-
-
-def _make_bar_chart(title: str, labels: list, values_prev: list,
-                    values_curr: list, year: int):
-    """Wykres słupkowy porównawczy (dwa lata)."""
-    pairs = [(l, p, c) for l, p, c in zip(labels, values_prev, values_curr)
-             if p != 0 or c != 0]
-    if not pairs:
-        return None
-    labels_f, prev_f, curr_f = zip(*pairs)
-    x = np.arange(len(labels_f))
-    width = 0.38
-
-    fig, ax = plt.subplots(figsize=(10, 4.5), dpi=130)
-    fig.patch.set_facecolor("white")
-    ax.set_facecolor("white")
-
-    bars_p = ax.bar(x - width/2, prev_f, width, color=BAR_COLORS_PREV,
-                    label=str(year - 1), zorder=3)
-    bars_c = ax.bar(x + width/2, curr_f, width, color=BAR_COLORS_CURR,
-                    label=str(year), zorder=3)
-
-    _setup_ax(ax, title, labels_f)
-    ax.legend(fontsize=9, framealpha=0)
-    _bar_labels(ax, list(bars_p) + list(bars_c), fontsize=7.5)
-    plt.tight_layout()
-    return _save_fig(fig)
-
-
-def _make_single_bar_chart(title: str, labels: list, values: list, year: int):
-    """Wykres słupkowy dla jednego roku."""
-    pairs = [(l, v) for l, v in zip(labels, values) if v != 0]
-    if not pairs:
-        return None
-    labels_f, vals_f = zip(*pairs)
-
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=130)
-    fig.patch.set_facecolor("white")
-    ax.set_facecolor("white")
-
-    bars = ax.bar(np.arange(len(labels_f)), vals_f, color=BAR_SINGLE, zorder=3, width=0.5)
-    _setup_ax(ax, title, labels_f, year_suffix=f" ({year})")
-    _bar_labels(ax, bars, fontsize=8)
-    plt.tight_layout()
-    return _save_fig(fig)
-
-
-def build_charts(chart_data: dict, year: int) -> list[tuple[str, bytes]]:
-    """
-    Buduje wszystkie wykresy z danych JSON.
-    Zwraca listę (tytuł, png_bytes).
-    """
+def generate_charts(data, year):
+    if not data: return []
     charts = []
-
-    # Wykres 1: Wynik finansowy (porównawczy)
-    w = chart_data.get("wynik", {})
-    if w:
-        png = _make_bar_chart(
-            w.get("tytul", "Wynik finansowy"),
-            w.get("etykiety", []),
-            w.get("rok_poprzedni", []),
-            w.get("rok_biezacy", []),
-            year
-        )
-        if png:
-            charts.append((w.get("tytul", "Wynik finansowy"), png))
-
-    # Wykres 2: Koszty rodzajowe (porównawczy)
-    k = chart_data.get("koszty", {})
-    if k:
-        png = _make_bar_chart(
-            k.get("tytul", "Struktura kosztów"),
-            k.get("etykiety", []),
-            k.get("rok_poprzedni", []),
-            k.get("rok_biezacy", []),
-            year
-        )
-        if png:
-            charts.append((k.get("tytul", "Struktura kosztów"), png))
-
-    # Wykres 3: Pasywa (pojedynczy rok)
-    p = chart_data.get("pasywa", {})
-    if p:
-        png = _make_single_bar_chart(
-            p.get("tytul", "Struktura pasywów"),
-            p.get("etykiety", []),
-            p.get("rok_biezacy", []),
-            year
-        )
-        if png:
-            charts.append((p.get("tytul", "Struktura pasywów"), png))
-
+    # 1. Aktywa pie
+    vals = [data.get("aktywa_trwale",0), data.get("aktywa_obrotowe",0)]
+    if all(v>0 for v in vals):
+        _setup_chart(); fig,ax = plt.subplots(figsize=(5,3.5))
+        ax.pie(vals,autopct="%1.1f%%",colors=_COLORS[:2],startangle=90,pctdistance=0.75,wedgeprops={"linewidth":1,"edgecolor":"white"})
+        ax.legend([f"Aktywa trwałe ({_fmt_pln(vals[0])} PLN)",f"Aktywa obrotowe ({_fmt_pln(vals[1])} PLN)"],loc="center left",bbox_to_anchor=(1,0.5),fontsize=8,frameon=False)
+        ax.set_title(f"Struktura aktywów — {year}",color="#1B2A4A")
+        buf=io.BytesIO(); fig.savefig(buf,format="png",bbox_inches="tight"); plt.close(fig); buf.seek(0)
+        charts.append(("Struktura aktywów",buf.getvalue()))
+    # 2. Pasywa pie
+    pv = [data.get("kapital_wlasny",0),data.get("zobowiazania_dlugoterminowe",0),data.get("zobowiazania_krotkoterminowe",0)]
+    pl = ["Kapitał własny","Zob. długoterm.","Zob. krótkoterm."]
+    filt = [(l,v) for l,v in zip(pl,pv) if v>0]
+    if len(filt)>=2:
+        _setup_chart(); fig,ax = plt.subplots(figsize=(5,3.5)); ls,vs=zip(*filt)
+        ax.pie(vs,autopct="%1.1f%%",colors=_COLORS[:len(vs)],startangle=90,pctdistance=0.75,wedgeprops={"linewidth":1,"edgecolor":"white"})
+        ax.legend([f"{l} ({_fmt_pln(v)} PLN)" for l,v in zip(ls,vs)],loc="center left",bbox_to_anchor=(1,0.5),fontsize=8,frameon=False)
+        ax.set_title(f"Struktura pasywów — {year}",color="#1B2A4A")
+        buf=io.BytesIO(); fig.savefig(buf,format="png",bbox_inches="tight"); plt.close(fig); buf.seek(0)
+        charts.append(("Struktura pasywów",buf.getvalue()))
+    # 3. Przychody vs koszty bar
+    cur=[data.get("przychody_ze_sprzedazy",0),data.get("koszty_dzialalnosci",0),data.get("wynik_finansowy_netto",0)]
+    prev=[data.get("przychody_rok_poprzedni",0),data.get("koszty_rok_poprzedni",0),data.get("wynik_rok_poprzedni",0)]
+    if cur[0]>0:
+        _setup_chart(); fig,ax = plt.subplots(figsize=(6,3.5)); x=range(3); w=0.35
+        if sum(prev)>0:
+            ax.bar([i-w/2 for i in x],prev,w,label="Rok poprzedni",color="#9ECAE1")
+            ax.bar([i+w/2 for i in x],cur,w,label="Rok bieżący",color="#1B2A4A")
+            ax.legend(fontsize=8,frameon=False)
+        else: ax.bar(x,cur,w*1.5,color=["#2D6A9F","#6BAED6","#27AE60" if cur[2]>=0 else "#E74C3C"])
+        ax.set_xticks(x); ax.set_xticklabels(["Przychody","Koszty","Wynik netto"])
+        ax.set_title(f"Przychody, koszty i wynik — {year}",color="#1B2A4A")
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v,p:_fmt_pln(v)))
+        buf=io.BytesIO(); fig.savefig(buf,format="png",bbox_inches="tight"); plt.close(fig); buf.seek(0)
+        charts.append(("Analiza wyniku finansowego",buf.getvalue()))
+    # 4. Środki trwałe bar
+    sb,su,sn = data.get("srodki_trwale_brutto",0),data.get("srodki_trwale_umorzenie",0),data.get("srodki_trwale_netto",0)
+    if sb>0:
+        _setup_chart(); fig,ax = plt.subplots(figsize=(5,3))
+        bars=ax.bar(["Wart. brutto","Umorzenie","Wart. netto"],[sb,su,sn],color=["#1B2A4A","#E74C3C","#27AE60"],width=0.5)
+        for bar,v in zip(bars,[sb,su,sn]): ax.text(bar.get_x()+bar.get_width()/2,bar.get_height(),_fmt_pln(v),ha="center",va="bottom",fontsize=8)
+        ax.set_title(f"Środki trwałe — {year}",color="#1B2A4A")
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v,p:_fmt_pln(v)))
+        buf=io.BytesIO(); fig.savefig(buf,format="png",bbox_inches="tight"); plt.close(fig); buf.seek(0)
+        charts.append(("Środki trwałe",buf.getvalue()))
     return charts
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MODUŁ 6: EKSPORT DO WORD
-# ═══════════════════════════════════════════════════════════════════════════════
+def _add_separator(doc,color="2D6A9F",sz="6"):
+    p=doc.add_paragraph(); pPr=p._p.get_or_add_pPr(); pBdr=OxmlElement("w:pBdr")
+    b=OxmlElement("w:bottom"); b.set(qn("w:val"),"single"); b.set(qn("w:sz"),sz)
+    b.set(qn("w:space"),"1"); b.set(qn("w:color"),color); pBdr.append(b); pPr.append(pBdr)
 
-NAVY  = RGBColor(0x1B, 0x2A, 0x4A)
-BLUE  = RGBColor(0x2D, 0x6A, 0x9F)
-WHITE = RGBColor(0xFF, 0xFF, 0xFF)
-DARK  = RGBColor(0x22, 0x22, 0x22)
-GRAY6 = RGBColor(0x66, 0x66, 0x66)
-GRAY9 = RGBColor(0x99, 0x99, 0x99)
-LIGHT = "EBF3FB"
+def _set_cell_shading(cell,color_hex):
+    shd=OxmlElement("w:shd"); shd.set(qn("w:fill"),color_hex); shd.set(qn("w:val"),"clear")
+    cell._tc.get_or_add_tcPr().append(shd)
 
+def _add_page_number(doc):
+    for section in doc.sections:
+        footer=section.footer; footer.is_linked_to_previous=False
+        p=footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+        p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+        run=p.add_run("Strona "); run.font.size=Pt(8); run.font.color.rgb=_CLR_LIGHT
+        f1=OxmlElement("w:fldChar"); f1.set(qn("w:fldCharType"),"begin"); p.add_run()._r.append(f1)
+        ins=OxmlElement("w:instrText"); ins.set(qn("xml:space"),"preserve"); ins.text=" PAGE "
+        r3=p.add_run(); r3.font.size=Pt(8); r3._r.append(ins)
+        f2=OxmlElement("w:fldChar"); f2.set(qn("w:fldCharType"),"end"); p.add_run()._r.append(f2)
 
-def add_horizontal_rule(doc):
-    p = doc.add_paragraph()
-    pPr = p._p.get_or_add_pPr()
-    pBdr = OxmlElement("w:pBdr")
-    bottom = OxmlElement("w:bottom")
-    bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), "6")
-    bottom.set(qn("w:space"), "1")
-    bottom.set(qn("w:color"), "2D6A9F")
-    pBdr.append(bottom)
-    pPr.append(pBdr)
-
-
-def _tcPr_shading(cell, fill_hex):
-    tcPr = cell._tc.get_or_add_tcPr()
-    shd = OxmlElement("w:shd")
-    shd.set(qn("w:val"), "clear")
-    shd.set(qn("w:color"), "auto")
-    shd.set(qn("w:fill"), fill_hex)
-    tcPr.append(shd)
-
-
-def _cell_margins(cell, val=80):
-    tcPr = cell._tc.get_or_add_tcPr()
-    tcMar = OxmlElement("w:tcMar")
-    for side in ("top", "bottom", "left", "right"):
-        el = OxmlElement(f"w:{side}")
-        el.set(qn("w:w"), str(val))
-        el.set(qn("w:type"), "dxa")
-        tcMar.append(el)
-    tcPr.append(tcMar)
-
-
-def _add_runs(para, text, bold=False, color=None, size_pt=None):
-    run = para.add_run(text)
-    run.font.name = "Calibri"
-    if bold is not None:
-        run.font.bold = bold
-    if color:
-        run.font.color.rgb = color
-    if size_pt:
-        run.font.size = Pt(size_pt)
-    return run
-
-
-def _add_inline_text(doc, line, style=None):
-    p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
-    p.paragraph_format.space_before = Pt(2)
-    p.paragraph_format.space_after  = Pt(2)
-    for part in re.split(r"(\*\*[^*]+\*\*)", line):
-        if part.startswith("**") and part.endswith("**"):
-            _add_runs(p, part[2:-2], bold=True)
-        else:
-            _add_runs(p, part, bold=False)
-    return p
-
-
-def _render_md_table(doc, table_lines):
-    rows_raw = [l for l in table_lines
-                if not re.match(r"^\|[\s\-:|]+\|$", l.strip())]
-    if not rows_raw:
-        return
-    rows = [[c.strip() for c in l.strip().strip("|").split("|")] for l in rows_raw]
-    ncols = max(len(r) for r in rows)
-    rows  = [r + [""] * (ncols - len(r)) for r in rows]
-    col_w = 8500 // ncols
-
-    table = doc.add_table(rows=len(rows), cols=ncols)
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.style = "Table Grid"
-
-    for ri, row_data in enumerate(rows):
-        is_header = (ri == 0)
-        for ci, raw_text in enumerate(row_data):
-            cell = table.rows[ri].cells[ci]
-            cell.width = Pt(col_w)
-            if is_header:
-                _tcPr_shading(cell, "1B2A4A")
-            elif ri % 2 == 1:
-                _tcPr_shading(cell, LIGHT)
-            _cell_margins(cell, 80)
-
-            clean = re.sub(r"[*][*]([^*]+)[*][*]", r"\1", raw_text)
-            clean = "".join(ch for ch in clean if ord(ch) >= 32 or ord(ch) in (9, 10, 13))
-            is_bold_md = "**" in raw_text
-
-            p = cell.paragraphs[0]
-            p.clear()
-            run = p.add_run(clean)
-            run.font.name = "Calibri"
-            run.font.size = Pt(9)
-            run.font.bold = is_header or is_bold_md
-            run.font.color.rgb = WHITE if is_header else DARK
-            if is_header:
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            elif re.search(r"\d", clean):
-                p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-
+def add_markdown_table_to_doc(doc,table_lines):
+    data_lines=[l for l in table_lines if not re.match(r"^\|[\s\-:|]+$",l)]
+    if not data_lines: return
+    rows=[[c.strip() for c in l.strip("|").split("|")] for l in data_lines]
+    if not rows: return
+    nc=max(len(r) for r in rows)
+    for r in rows:
+        while len(r)<nc: r.append("")
+    table=doc.add_table(rows=len(rows),cols=nc)
+    try: table.style="Table Grid"
+    except: pass
+    table.autofit=True
+    tblPr=table._tbl.tblPr if table._tbl.tblPr else OxmlElement("w:tblPr")
+    borders=OxmlElement("w:tblBorders")
+    for edge in ["top","left","bottom","right","insideH","insideV"]:
+        el=OxmlElement(f"w:{edge}"); el.set(qn("w:val"),"single"); el.set(qn("w:sz"),"4")
+        el.set(qn("w:space"),"0"); el.set(qn("w:color"),"B0B0B0"); borders.append(el)
+    tblPr.append(borders)
+    for i,rd in enumerate(rows):
+        for j,ct in enumerate(rd):
+            cell=table.rows[i].cells[j]; cell.text=""; p=cell.paragraphs[0]
+            p.paragraph_format.space_before=Pt(2); p.paragraph_format.space_after=Pt(2)
+            if i==0:
+                _set_cell_shading(cell,_TBL_HDR)
+                run=p.add_run(ct.replace("**","")); run.bold=True; run.font.size=Pt(8)
+                run.font.color.rgb=RGBColor(0xFF,0xFF,0xFF)
+            else:
+                if i%2==0: _set_cell_shading(cell,_TBL_ALT)
+                parts=re.split(r"(\*\*[^*]+\*\*)",ct)
+                for part in parts:
+                    if part.startswith("**") and part.endswith("**"): run=p.add_run(part[2:-2]); run.bold=True
+                    else: run=p.add_run(part)
+                    run.font.size=Pt(8); run.font.color.rgb=_CLR_BLACK
     doc.add_paragraph()
 
 
-def _strip_chart_block(text: str) -> str:
-    """Usuwa blok ```wykres_dane z tekstu przed zapisem do Word."""
-    return re.sub(r"```wykres_dane.*?```", "", text, flags=re.DOTALL).strip()
-
-
-def save_to_word(generated_text: str, company_name: str, year: int,
-                 charts: list = None) -> bytes:
-    doc = Document()
-
-    # Style
-    normal = doc.styles["Normal"]
-    normal.font.name = "Calibri"
-    normal.font.size = Pt(10)
-    for lvl, sz, col in [(1, 14, NAVY), (2, 12, BLUE), (3, 11, NAVY)]:
-        s = doc.styles[f"Heading {lvl}"]
-        s.font.name = "Calibri"
-        s.font.size = Pt(sz)
-        s.font.bold = True
-        s.font.color.rgb = col
-
+def save_to_word(generated_text,company_name,year,company_info=None):
+    doc=Document()
+    chart_data=_extract_chart_data(generated_text)
+    clean_text=_strip_chart_data(generated_text)
+    charts=generate_charts(chart_data,year)
+    info=company_info or {}
+    style=doc.styles["Normal"]; style.font.name="Calibri"; style.font.size=Pt(10)
+    style.font.color.rgb=_CLR_BLACK; style.paragraph_format.line_spacing=1.15
+    for lev,sz,clr in [(1,14,_CLR_NAVY),(2,12,_CLR_BLUE),(3,11,_CLR_NAVY),(4,10,_CLR_BLUE)]:
+        h=doc.styles[f"Heading {lev}"]; h.font.name="Calibri"; h.font.size=Pt(sz)
+        h.font.bold=True; h.font.color.rgb=clr
     for section in doc.sections:
-        section.left_margin   = Cm(2.5)
-        section.right_margin  = Cm(2.5)
-        section.top_margin    = Cm(2.0)
-        section.bottom_margin = Cm(1.8)
-
+        section.left_margin=Inches(1.0); section.right_margin=Inches(1.0)
+        section.top_margin=Inches(0.8); section.bottom_margin=Inches(0.7)
+    _add_page_number(doc)
     # Strona tytułowa
-    h = doc.add_paragraph()
-    _add_runs(h, f"{company_name} | Informacja Dodatkowa {year}",
-              bold=False, color=GRAY6, size_pt=9)
-    h.paragraph_format.space_after = Pt(12)
-
-    t = doc.add_paragraph()
-    t.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _add_runs(t, "INFORMACJA DODATKOWA", bold=True, color=NAVY, size_pt=22)
-    t.paragraph_format.space_before = Pt(24)
-    t.paragraph_format.space_after  = Pt(4)
-
-    for txt, sz in [("do sprawozdania finansowego", 14), (f"za rok obrotowy {year}", 14)]:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _add_runs(p, txt, bold=False, color=BLUE, size_pt=sz)
-    doc.paragraphs[-1].paragraph_format.space_after = Pt(16)
-
-    for label, val in [("Jednostka", company_name),
-                        ("Okres sprawozdawczy", f"01.01.{year} — 31.12.{year}")]:
-        p = doc.add_paragraph()
-        _add_runs(p, f"{label}: ", bold=False, color=GRAY6, size_pt=10)
-        _add_runs(p, val, bold=True, color=GRAY6, size_pt=10)
-
-    p_date = doc.add_paragraph()
-    _add_runs(p_date, f"Wygenerowano: {datetime.now().strftime('%d.%m.%Y')}",
-              bold=False, color=GRAY9, size_pt=9)
-    p_date.paragraph_format.space_before = Pt(8)
+    for _ in range(4): doc.add_paragraph()
+    _add_separator(doc,"2D6A9F","12")
+    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    run=p.add_run("INFORMACJA DODATKOWA"); run.font.size=Pt(22); run.font.bold=True; run.font.color.rgb=_CLR_NAVY
+    p2=doc.add_paragraph(); p2.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    run2=p2.add_run(f"do sprawozdania finansowego za rok obrotowy {year}")
+    run2.font.size=Pt(14); run2.font.color.rgb=_CLR_BLUE
+    _add_separator(doc,"2D6A9F","12"); doc.add_paragraph()
+    fields=[("Jednostka",info.get("nazwa") or company_name),("Forma prawna",info.get("forma_prawna","")),
+            ("Siedziba",info.get("siedziba","")),("NIP",info.get("nip","")),
+            ("KRS",info.get("krs","")),("REGON",info.get("regon","")),
+            ("Okres sprawozdawczy",f"{info.get('okres_od','')} — {info.get('okres_do','')}"  )]
+    for label,value in fields:
+        if not value or value==" — ": continue
+        p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+        rl=p.add_run(f"{label}: "); rl.font.size=Pt(10); rl.font.color.rgb=_CLR_GRAY
+        rv=p.add_run(value); rv.font.size=Pt(10); rv.font.bold=True; rv.font.color.rgb=_CLR_NAVY
+    doc.add_paragraph()
+    pd=doc.add_paragraph(); pd.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    rd=pd.add_run(f"Wygenerowano: {date.today().strftime('%d.%m.%Y')}")
+    rd.font.size=Pt(9); rd.font.color.rgb=_CLR_LIGHT; rd.font.italic=True
     doc.add_page_break()
-
-    # Treść — bez bloku wykres_dane
-    content = _strip_chart_block(generated_text)
-    lines = content.split("\n")
-    i = 0
-    while i < len(lines):
-        strip = lines[i].strip()
-        if not strip:
-            i += 1
-            continue
-
-        if strip.startswith("|"):
-            tbl = []
-            while i < len(lines) and lines[i].strip().startswith("|"):
-                tbl.append(lines[i].strip())
-                i += 1
-            _render_md_table(doc, tbl)
-            continue
-
-        if strip.startswith("#### "):
-            h = doc.add_heading(strip[5:], level=4)
-            for r in h.runs: r.font.name = "Calibri"
-        elif strip.startswith("### "):
-            doc.add_heading(strip[4:], level=3)
-        elif strip.startswith("## "):
-            doc.add_heading(strip[3:], level=2)
-        elif strip.startswith("# "):
-            doc.add_heading(strip[2:], level=1)
-        elif strip.startswith("---"):
-            add_horizontal_rule(doc)
-        elif strip.startswith("- ") or strip.startswith("* "):
-            _add_inline_text(doc, strip[2:], style="List Bullet")
-        elif re.match(r"^\d+\.\s", strip):
-            _add_inline_text(doc, strip, style="List Number")
+    # Parsowanie
+    lines=clean_text.split("\n"); i=0
+    while i<len(lines):
+        line=lines[i].strip()
+        if line.startswith("|") and "|" in line[1:]:
+            tl=[]
+            while i<len(lines) and lines[i].strip().startswith("|"):
+                tl.append(lines[i].strip()); i+=1
+            add_markdown_table_to_doc(doc,tl); continue
+        i+=1
+        if not line: continue
+        if line.startswith("#### "): doc.add_heading(line[5:],level=4)
+        elif line.startswith("### "): doc.add_heading(line[4:],level=3)
+        elif line.startswith("## "): doc.add_heading(line[3:],level=2)
+        elif line.startswith("# "): doc.add_heading(line[2:],level=1)
+        elif line.startswith("---"): _add_separator(doc,"CCCCCC","2")
+        elif line.startswith("**") and line.endswith("**"):
+            p=doc.add_paragraph(); run=p.add_run(line.strip("*")); run.bold=True; run.font.color.rgb=_CLR_NAVY
+        elif line.startswith("- ") or line.startswith("* "): doc.add_paragraph(line[2:],style="List Bullet")
+        elif re.match(r"^\d+\.\s",line): doc.add_paragraph(line,style="List Number")
         else:
-            _add_inline_text(doc, strip)
-        i += 1
-
+            p=doc.add_paragraph()
+            for part in re.split(r"(\*\*[^*]+\*\*)",line):
+                if part.startswith("**") and part.endswith("**"): run=p.add_run(part[2:-2]); run.bold=True
+                else: p.add_run(part)
     # Wykresy
     if charts:
-        doc.add_page_break()
-        heading = doc.add_heading("Analiza graficzna", level=1)
-        for r in heading.runs:
-            r.font.color.rgb = NAVY
-
-        for chart_title, png_bytes in charts:
-            h3 = doc.add_heading(chart_title, level=3)
-            for r in h3.runs:
-                r.font.color.rgb = BLUE
-            img_stream = io.BytesIO(png_bytes)
-            doc.add_picture(img_stream, width=Cm(16))
-            doc.add_paragraph()
-
+        doc.add_page_break(); doc.add_heading("Analiza graficzna",level=1)
+        for idx,(title,png) in enumerate(charts):
+            pt=doc.add_paragraph(); run=pt.add_run(f"Wykres {idx+1}. {title}")
+            run.bold=True; run.font.color.rgb=_CLR_BLUE
+            pi=doc.add_paragraph(); pi.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            pi.add_run().add_picture(io.BytesIO(png),width=Inches(5.0))
     # Stopka
-    add_horizontal_rule(doc)
-    foot = doc.add_paragraph(f"Informacja Dodatkowa | {company_name} | Rok {year}")
-    foot.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for r in foot.runs:
-        r.font.name = "Calibri"
-        r.font.size = Pt(8)
-        r.font.color.rgb = GRAY9
-
-    buf = io.BytesIO()
-    doc.save(buf)
-    return buf.getvalue()
-
-
-def _sanitize_text(text: str) -> str:
-    import unicodedata
-    return "".join(
-        ch for ch in text
-        if (ord(ch) in (9, 10, 13) or ord(ch) >= 32)
-        and unicodedata.category(ch) != "Cs"
-    )
+    _add_separator(doc,"2D6A9F","4")
+    fp=doc.add_paragraph(); fp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    fr=fp.add_run(f"Informacja Dodatkowa | {company_name} | {year} | {date.today().strftime('%d.%m.%Y')}")
+    fr.font.size=Pt(8); fr.font.color.rgb=_CLR_LIGHT; fr.font.italic=True
+    buffer=io.BytesIO(); doc.save(buffer); return buffer.getvalue()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GŁÓWNY INTERFEJS
+# GŁÓWNY INTERFEJS STREAMLIT
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ── Odczyt kluczy z Streamlit Secrets (jeśli ustawione) ─────────────────────
 _anthropic_from_secrets = st.secrets.get("ANTHROPIC_API_KEY", "")
-_llama_from_secrets     = st.secrets.get("LLAMA_API_KEY", "")
-_app_password           = st.secrets.get("APP_PASSWORD", "")
+_app_password = st.secrets.get("APP_PASSWORD", "")
 
+# ── Ochrona hasłem ───────────────────────────────────────────────────────────────────────────
 if _app_password:
     if not st.session_state.get("authenticated"):
         st.markdown("""
-        <div style="max-width:400px;margin:4rem auto;padding:2rem;
-                    border:1px solid #dee2e6;border-radius:12px;
-                    box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:center;">
+        <div style="max-width:400px; margin: 4rem auto; padding: 2rem;
+                    border:1px solid #dee2e6; border-radius:12px;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align:center;">
             <h2>🔐 Dostęp chroniony</h2>
             <p style="color:#666;">Wprowadź hasło aby kontynuować</p>
-        </div>""", unsafe_allow_html=True)
-        _, col_mid, _ = st.columns([1, 2, 1])
+        </div>
+        """, unsafe_allow_html=True)
+        col_c, col_mid, col_d = st.columns([1, 2, 1])
         with col_mid:
             entered = st.text_input("Hasło", type="password",
                                     label_visibility="collapsed",
-                                    placeholder="Wpisz hasło...")
+                                    placeholder="Wpisz hasło dostępu...")
             if st.button("Zaloguj →", use_container_width=True, type="primary"):
                 if entered == _app_password:
                     st.session_state["authenticated"] = True
                     st.rerun()
                 else:
-                    st.error("❌ Nieprawidłowe hasło")
+                    st.error("❌ Nieprawiłowe hasło")
         st.stop()
 
-# ── SIDEBAR ───────────────────────────────────────────────────────────────────
+# ── Sidebar: Konfiguracja ────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Konfiguracja")
 
@@ -991,58 +1268,144 @@ with st.sidebar:
         st.success("🔑 Klucz API Anthropic: wczytany automatycznie")
         anthropic_key = _anthropic_from_secrets
     else:
-        anthropic_key = st.text_input("🔑 Klucz API Anthropic", type="password",
-                                       placeholder="sk-ant-...")
-
-    if _llama_from_secrets:
-        st.success("🦙 Klucz LlamaParse: wczytany automatycznie")
-        llama_key = _llama_from_secrets
-    else:
-        llama_key = st.text_input("🦙 Klucz LlamaParse (opcjonalny)", type="password",
-                                   placeholder="llx-...")
+        anthropic_key = st.text_input(
+            "🔑 Klucz API Anthropic",
+            type="password",
+            placeholder="sk-ant-...",
+            help="Wymagany do generowania przez Claude 3.5 Sonnet"
+        )
 
     st.divider()
     st.subheader("🏢 Dane jednostki")
 
-    krs_input = st.text_input("🔍 Numer KRS", placeholder="0000123456",
-                               help="10-cyfrowy numer KRS — znajdziesz na prs.ms.gov.pl")
-    st.caption("ℹ️ API KRS działa po numerze KRS (nie NIP).")
-    debug_krs = st.checkbox("🔍 Tryb diagnostyczny KRS", value=False)
+    # ── Pobieranie z KRS po NIP ──────────────────────────────────────────
+    krs_input = st.text_input(
+        "🔍 Numer KRS spółki (opcjonalnie)",
+        placeholder="0000123456",
+        help="Opcjonalne — wpisz numer KRS aby auto-wypełnić dane. Dla JDG/CEIDG zostaw puste i wpisz dane ręcznie."
+    )
+    st.caption("ℹ️ KRS opcjonalny. Dla firm bez KRS (JDG) wpisz dane ręcznie w pola poniżej.")
+    debug_krs = st.checkbox("🔍 Tryb diagnostyczny KRS", value=False,
+                             help="Pokaż surową odpowiedź API KRS — pomocne przy błędach")
 
     if st.button("⬇️ Pobierz dane z KRS", use_container_width=True):
         if krs_input:
-            with st.spinner("Pobieranie z API KRS..."):
+            with st.spinner("Pobieranie z API KRS Ministerstwa Sprawiedliwości..."):
                 try:
                     if debug_krs:
-                        krs_data, log = fetch_krs_by_krs_nr_debug(krs_input)
-                        st.code(log)
+                        krs_data, krs_debug_log = fetch_krs_by_krs_nr_debug(krs_input)
+                        st.code(krs_debug_log)
                     else:
                         krs_data = fetch_krs_by_krs_nr(krs_input)
                     if krs_data:
                         st.session_state["krs_data"] = krs_data
+                        st.session_state.pop("wspolnicy_edit", None)  # Reset edytowanych wspólników
                         st.success("✅ Dane pobrane z KRS!")
                     else:
-                        st.error("❌ Nie znaleziono. Sprawdź numer KRS.")
+                        st.error("❌ Nie znaleziono. Sprawdź numer KRS lub uzupełnij ręcznie.")
+                except ConnectionError:
+                    st.error("❌ Brak połączenia z API KRS.")
+                except TimeoutError:
+                    st.error("❌ API KRS nie odpowiada. Spróbuj za chwilę.")
                 except Exception as e:
-                    st.error(f"❌ {e}")
+                    st.error(f"❌ Błąd: {e}")
         else:
-            st.warning("Wpisz numer KRS.")
+            st.warning("Wpisz numer KRS aby pobrać dane.")
 
     krs = st.session_state.get("krs_data", {})
 
-    company_name     = st.text_input("Nazwa spółki",       value=krs.get("nazwa", ""),          placeholder="XYZ Sp. z o.o.")
-    company_siedziba = st.text_input("Siedziba",           value=krs.get("siedziba", ""),        placeholder="ul. Przykładowa 1, 00-001 Warszawa")
-    company_nip      = st.text_input("NIP",                value=krs.get("nip", ""),             placeholder="1234567890")
-    company_krs      = st.text_input("Nr KRS",             value=krs.get("krs", krs_input or ""),placeholder="0000000000")
-    company_regon    = st.text_input("REGON",              value=krs.get("regon", ""),           placeholder="000000000")
-    company_pkd      = st.text_input("Główne PKD",         value=krs.get("pkd", ""),             placeholder="69.20.Z Rachunkowość")
-    company_data_rej = st.text_input("Data rejestracji",   value=krs.get("data_rejestracji",""), placeholder="DD.MM.RRRR")
-    company_forma    = st.text_input("Forma prawna",       value=krs.get("forma_prawna", ""),    placeholder="SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ")
+    company_name = st.text_input("Nazwa spółki",
+                                  value=krs.get("nazwa", ""),
+                                  placeholder="XYZ Sp. z o.o.")
+    company_siedziba = st.text_input("Siedziba",
+                                      value=krs.get("siedziba", ""),
+                                      placeholder="ul. Przykładowa 1, 00-001 Warszawa")
+    company_nip = st.text_input("NIP",
+                                 value=krs.get("nip", ""),
+                                 placeholder="1234567890")
+    company_krs = st.text_input("Nr KRS",
+                                 value=krs.get("krs", krs_input if krs_input else ""),
+                                 placeholder="0000000000")
+    company_regon = st.text_input("REGON",
+                                   value=krs.get("regon", ""),
+                                   placeholder="000000000")
+    company_pkd = st.text_input("Główne PKD",
+                                 value=krs.get("pkd", ""),
+                                 placeholder="np. 69.20.Z Działalność rachunkowo-księgowa")
+    company_data_rej = st.text_input("Data rejestracji w KRS",
+                                      value=krs.get("data_rejestracji", ""),
+                                      placeholder="RRRR-MM-DD")
+    company_forma = st.text_input("Forma prawna",
+                                   value=krs.get("forma_prawna", ""),
+                                   placeholder="np. SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ / JDG")
+
+    # Wspólnicy — edytowalne pola, auto-wypełniane z KRS
+    st.divider()
+    st.subheader("👥 Wspólnicy / Właściciel")
+    st.caption("Dla spółek — auto-wypełniane z KRS (dane mogą być ocenzurowane, popraw ręcznie). "
+               "Dla JDG / CEIDG — wpisz dane właściciela ręcznie.")
+
+    krs_wspolnicy = krs.get("wspolnicy", [])
+    krs_kapital = krs.get("kapital_podstawowy", "")
+
+    kapital_podstawowy = st.text_input(
+        "Kapitał podstawowy (PLN) — nie dotyczy JDG",
+        value=krs_kapital,
+        placeholder="np. 5 000,00 (zostaw puste dla JDG)"
+    )
+
+    # Inicjalizuj listę wspólników z KRS (jeśli jeszcze nie edytowano)
+    if "wspolnicy_edit" not in st.session_state:
+        if krs_wspolnicy:
+            st.session_state["wspolnicy_edit"] = [
+                {"nazwa": w["nazwa"], "rola": w["liczba_udzialow"], "wartosc": w["wartosc_udzialow"]}
+                for w in krs_wspolnicy
+            ]
+        else:
+            st.session_state["wspolnicy_edit"] = []
+
+    n_wspolnikow = st.number_input(
+        "Liczba wspólników / właścicieli",
+        min_value=0, max_value=20,
+        value=len(st.session_state.get("wspolnicy_edit", krs_wspolnicy)),
+        step=1,
+        help="Dla JDG wpisz 1 (właściciel)"
+    )
+
+    wspolnicy_edit = []
+    for i in range(int(n_wspolnikow)):
+        # Domyślne wartości z KRS lub puste
+        defaults = {}
+        if "wspolnicy_edit" in st.session_state and i < len(st.session_state["wspolnicy_edit"]):
+            defaults = st.session_state["wspolnicy_edit"][i]
+        elif i < len(krs_wspolnicy):
+            w = krs_wspolnicy[i]
+            defaults = {"nazwa": w["nazwa"], "rola": w["liczba_udzialow"], "wartosc": w["wartosc_udzialow"]}
+
+        cols = st.columns([3, 2, 2])
+        with cols[0]:
+            nazwa = st.text_input(f"Wspólnik/właściciel {i+1} — imię i nazwisko / nazwa",
+                                   value=defaults.get("nazwa", ""),
+                                   key=f"wsp_nazwa_{i}")
+        with cols[1]:
+            rola = st.text_input(f"Rola / udziały",
+                                  value=defaults.get("rola", ""),
+                                  key=f"wsp_rola_{i}",
+                                  placeholder="np. 100 udziałów / komandytariusz")
+        with cols[2]:
+            wartosc = st.text_input(f"Wartość wkładu / udziałów",
+                                     value=defaults.get("wartosc", ""),
+                                     key=f"wsp_wartosc_{i}",
+                                     placeholder="np. 5 000 PLN")
+        if nazwa:
+            wspolnicy_edit.append({"nazwa": nazwa, "rola": rola, "wartosc": wartosc})
+
+    st.session_state["wspolnicy_edit"] = wspolnicy_edit
 
     st.divider()
     st.subheader("📅 Okres sprawozdawczy")
-    okres_od   = st.date_input("Od", value=date(date.today().year - 1, 1,  1))
-    okres_do   = st.date_input("Do", value=date(date.today().year - 1, 12, 31))
+    okres_od = st.date_input("Od", value=date(date.today().year - 1, 1, 1))
+    okres_do = st.date_input("Do", value=date(date.today().year - 1, 12, 31))
     fiscal_year = okres_do.year
 
     st.divider()
@@ -1050,17 +1413,39 @@ with st.sidebar:
     zagrozenie_kontynuacji = st.checkbox(
         "Istnieją okoliczności wskazujące na zagrożenie kontynuowania działalności "
         "w okresie co najmniej 12 miesięcy od dnia bilansowego",
-        value=False, help="Art. 5 ust. 2 UoR"
+        value=False,
+        help="Art. 5 ust. 2 UoR — zaznacz jeśli istnieją takie okoliczności"
     )
-    zagrozenie_opis = ""
     if zagrozenie_kontynuacji:
-        zagrozenie_opis = st.text_area("Opis okoliczności:", height=100)
+        zagrozenie_opis = st.text_area(
+            "Opis okoliczności zagrożenia:",
+            placeholder="Opisz okoliczności wskazujące na zagrożenie kontynuowania działalności...",
+            height=100
+        )
+    else:
+        zagrozenie_opis = ""
 
     st.divider()
     st.subheader("👥 Zatrudnienie")
-    zatrudnienie_biezacy   = st.number_input("Rok bieżący (etaty)",  min_value=0, value=0, step=1)
-    zatrudnienie_poprzedni = st.number_input("Rok poprzedni (etaty)",min_value=0, value=0, step=1)
-    zatrudnienie_uwagi     = st.text_input("Uwagi", placeholder="np. w tym 2 osoby na zleceniu")
+    zatrudnienie_biezacy = st.number_input(
+        f"Średnie zatrudnienie — rok bieżący (etaty)",
+        min_value=0, value=0, step=1,
+        help="Średnia liczba pracowników w etatach przeliczeniowych w roku obrotowym"
+    )
+    zatrudnienie_poprzedni = st.number_input(
+        f"Średnie zatrudnienie — rok poprzedni (etaty)",
+        min_value=0, value=0, step=1,
+        help="Średnia liczba pracowników w etatach przeliczeniowych w roku poprzednim"
+    )
+    zatrudnienie_uwagi = st.text_input(
+        "Uwagi do zatrudnienia (opcjonalnie)",
+        placeholder="np. w tym 2 osoby na umowie zlecenie"
+    )
+    wynagrodzenie_audytora = st.text_input(
+        "Wynagrodzenie firmy audytorskiej (PLN)",
+        placeholder="np. 5000 (zostaw puste jeśli nie dotyczy)",
+        help="Kwota za badanie sprawozdania — zostaw puste jeśli spółka nie podlega badaniu"
+    )
 
     st.divider()
     st.markdown("""
@@ -1070,261 +1455,416 @@ with st.sidebar:
     - 🏗️ Tabela środków trwałych
     - 💸 Przepływy pieniężne
     - 📜 Polityka rachunkowości
-    - ⚖️ Zestawienie Obrotów i Sald
+    - ⚖️ Zestawienie Obrotów i Sald (ZOiS)
+    - 📋 Ankieta bilansowa (od klienta)
     """)
 
-# ── GŁÓWNA SEKCJA ─────────────────────────────────────────────────────────────
-col1, col2 = st.columns(2)
+
+# ── Główna sekcja ────────────────────────────────────────────────────────────
+col1, col2 = st.columns([1, 1])
+
 with col1:
-    st.markdown('<div class="step-card"><b>📁 Krok 1:</b> Wgraj dokumenty PDF</div>',
+    st.markdown('<div class="step-card"><b>📁 Krok 1:</b> Wgraj dokumenty sprawozdania</div>',
                 unsafe_allow_html=True)
-    uploaded_files = st.file_uploader("Wybierz pliki PDF", type=["pdf"],
-                                       accept_multiple_files=True)
+    uploaded_files = st.file_uploader(
+        "Dokumenty za ROK BIEŻĄCY (obowiązkowe)",
+        type=["pdf", "docx", "xlsx"],
+        accept_multiple_files=True,
+        help="Wgraj dokumenty: bilans, RZiS, ŚT, ZOiS, ankietę bilansową itp."
+    )
+
     if uploaded_files:
-        st.success(f"✅ Wgrano {len(uploaded_files)} plik(ów)")
+        st.success(f"✅ Wgrano {len(uploaded_files)} plik(ów) za rok bieżący")
         for f in uploaded_files:
-            st.caption(f"📄 {f.name} ({len(f.getvalue())//1024} KB)")
+            size_kb = len(f.getvalue()) // 1024
+            st.caption(f"📄 {f.name} ({size_kb} KB)")
+
+    with st.expander("📂 Dokumenty za rok poprzedni z innego źródła (opcjonalnie)"):
+        st.caption("Jeśli dane za rok poprzedni pochodzą z innego biura — wgraj je tutaj.")
+        uploaded_prev = st.file_uploader(
+            "Dokumenty za ROK POPRZEDNI",
+            type=["pdf", "docx", "xlsx"],
+            accept_multiple_files=True,
+            key="prev_year_files",
+        )
+        if uploaded_prev:
+            st.success(f"✅ Wgrano {len(uploaded_prev)} plik(ów) za rok poprzedni")
 
 with col2:
-    st.markdown('<div class="step-card"><b>🔍 Krok 2:</b> Walidacja i generowanie</div>',
+    st.markdown('<div class="step-card"><b>🔍 Krok 2:</b> Walidacja i mapowanie dokumentów</div>',
                 unsafe_allow_html=True)
+
     if not anthropic_key:
-        st.info("👈 Wprowadź klucz API Anthropic w panelu bocznym.")
+        st.info("👈 Wprowadź klucz API Anthropic w panelu bocznym, aby kontynuować.")
     elif not uploaded_files:
-        st.info("👈 Wgraj pliki PDF.")
+        st.info("👈 Wgraj pliki PDF, aby rozpocząć.")
     elif not company_name:
-        st.warning("⚠️ Wprowadź nazwę spółki.")
+        st.warning("⚠️ Wprowadź nazwę spółki w panelu bocznym.")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MASZYNA STANÓW
-# ═══════════════════════════════════════════════════════════════════════════════
-
+# ── Przycisk uruchomienia ────────────────────────────────────────────────────
 st.divider()
-
-def _reset_state():
-    for k in ["app_state","parsed_docs","doc_mapping","missing_docs",
-              "polityka_answers","generated_text","docx_bytes"]:
-        st.session_state.pop(k, None)
-
-def _set_state(s): st.session_state["app_state"] = s
-def _get_state(): return st.session_state.get("app_state", "idle")
 
 run_disabled = not (anthropic_key and uploaded_files and company_name)
 if st.button("🚀 Generuj Informację Dodatkową", type="primary",
-             disabled=run_disabled, use_container_width=True):
-    _reset_state()
-    _set_state("parsing")
+              disabled=run_disabled, use_container_width=True):
+    st.session_state["run_generation"] = True
+    st.session_state.pop("missing_decision", None)
+    st.session_state.pop("polityka_answers", None)
+    st.session_state.pop("parsed_docs", None)
+    st.session_state.pop("parsed_prev", None)
+    st.session_state.pop("doc_mapping", None)
+    st.session_state.pop("generated_text", None)
+    st.session_state.pop("docx_bytes", None)
     st.rerun()
 
-# ── STAN: parsing ─────────────────────────────────────────────────────────────
-if _get_state() == "parsing":
-    pb = st.progress(0); st_txt = st.empty()
-    try:
-        st_txt.info("📄 Parsowanie dokumentów PDF...")
-        pb.progress(10)
+if st.session_state.get("run_generation") and uploaded_files:
 
-        def _upd(v, m): pb.progress(int(10 + v * 20)); st_txt.info(f"📄 {m}")
-
-        parsed = (parse_documents_llamaparse(uploaded_files, llama_key, _upd)
-                  if llama_key else parse_documents_fallback(uploaded_files, _upd))
-
-        st_txt.info("🗂️ Mapowanie dokumentów...")
-        pb.progress(40)
-        doc_mapping = map_documents(parsed)
-
-        st.session_state["parsed_docs"]  = parsed
-        st.session_state["doc_mapping"]  = doc_mapping
-        st.session_state["missing_docs"] = check_missing_documents(doc_mapping)
-
-        pb.empty(); st_txt.empty()
-        _set_state("confirm_missing" if st.session_state["missing_docs"] else "polityka")
-        st.rerun()
-    except Exception as e:
-        pb.empty(); st_txt.empty()
-        _set_state("error"); st.session_state["error_msg"] = str(e); st.rerun()
-
-# ── STAN: confirm_missing ─────────────────────────────────────────────────────
-elif _get_state() == "confirm_missing":
-    missing    = st.session_state.get("missing_docs", [])
-    doc_mapping = st.session_state.get("doc_mapping", {})
-
-    st.subheader("📋 Rozpoznane dokumenty")
-    cols = st.columns(max(len(doc_mapping), 1))
-    for i, (fname, ddata) in enumerate(doc_mapping.items()):
-        with cols[i % len(cols)]:
-            st.markdown(f'<div class="metric-box"><b>{ddata["type"]}</b><br>'
-                        f'<small>{fname}</small></div>', unsafe_allow_html=True)
-
-    st.warning("⚠️ Nie znaleziono wszystkich dokumentów.")
-    st.markdown("**Brakujące:**")
-    for dt in missing:
-        info_dt = REQUIRED_DOC_TYPES[dt]
-        st.markdown(f"- {info_dt['icon']} **{info_dt['label']}** — {info_dt['desc']}")
-
-    st.info("💡 Jeśli kilka dokumentów jest w jednym PDF — spróbuj je rozdzielić.")
-    st.markdown("---")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("▶️ Kontynuuj bez brakujących",
-                     use_container_width=True, type="primary"):
-            _set_state("polityka"); st.rerun()
-    with col_b:
-        if st.button("📁 Anuluj — chcę dodać pliki", use_container_width=True):
-            _reset_state(); st.rerun()
-
-# ── STAN: polityka ────────────────────────────────────────────────────────────
-elif _get_state() == "polityka":
-    doc_mapping = st.session_state.get("doc_mapping", {})
-    types_found = {d["type"] for d in doc_mapping.values()}
-
-    if "POLITYKA RACHUNKOWOŚCI" not in types_found:
-        st.warning("📜 Brak Polityki Rachunkowości — wypełnij poniższe pytania.")
-        with st.form("polityka_form"):
-            st.subheader("📋 Zasady rachunkowości")
-            q1 = st.selectbox("1. Zasady ustalania wyniku:", [
-                "Wariant porównawczy (układ rodzajowy kosztów)",
-                "Wariant kalkulacyjny (układ funkcjonalny kosztów)"])
-            q2a = st.selectbox("2a. Wycena zapasów:", [
-                "FIFO", "LIFO", "Cena przeciętna (średnia ważona)",
-                "Ceny ewidencyjne z odchyleniami", "Nie dotyczy (brak zapasów)"])
-            q2b = st.selectbox("2b. Amortyzacja ST:", [
-                "Liniowa", "Degresywna",
-                "Jednorazowy odpis (niskocenne do 10 000 zł)", "Mieszana"])
-            q2c = st.selectbox("2c. Wycena należności:", [
-                "Wartość nominalna z odpisami aktualizującymi",
-                "Wartość nominalna bez odpisów", "Wartość godziwa"])
-            q3 = st.selectbox("3. Rodzaj sprawozdania:", [
-                "Pełne sprawozdanie finansowe",
-                "Uproszczone (art. 46 ust. 5 UoR — jednostki małe)",
-                "Załącznik nr 4 UoR (mikro jednostki)",
-                "Załącznik nr 5 UoR (małe NGO)"])
-            q4 = st.checkbox("Tworzy rezerwę/aktywa z tytułu CIT odroczonego", value=True)
-            q5 = st.selectbox("Leasing:", [
-                "Wg UoR (operacyjny/finansowy wg treści ekonomicznej)",
-                "Tylko operacyjny",
-                "Nie dotyczy (brak umów leasingowych)"])
-            uwagi = st.text_area("Uwagi dodatkowe:", height=70)
-
-            if st.form_submit_button("✅ Zatwierdź i generuj",
-                                     use_container_width=True, type="primary"):
-                st.session_state["polityka_answers"] = {
-                    "wynik_finansowy": q1, "wycena_zapasow": q2a,
-                    "amortyzacja": q2b, "wycena_naleznosci": q2c,
-                    "sposob_sprawozdania": q3, "podatek_odroczony": q4,
-                    "leasing": q5, "uwagi": uwagi,
-                }
-                _set_state("generating"); st.rerun()
-    else:
-        st.session_state["polityka_answers"] = {}
-        _set_state("generating"); st.rerun()
-
-# ── STAN: generating ──────────────────────────────────────────────────────────
-elif _get_state() == "generating":
-    doc_mapping      = st.session_state.get("doc_mapping", {})
-    polityka_answers = st.session_state.get("polityka_answers", {})
-
-    pb = st.progress(0); st_txt = st.empty(); results_box = st.container()
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    results_container = st.container()
 
     try:
-        # Walidacja
-        st_txt.info("✅ Walidacja spójności danych...")
-        pb.progress(55)
-        issues = validate_data_consistency(doc_mapping)
+        # ── KROK 1: Parsowanie (cache w session_state) ───────────────────
+        if "parsed_docs" not in st.session_state:
+            status_text.info("📄 Krok 1/5: Parsowanie dokumentów...")
+            progress_bar.progress(10)
 
-        with results_box:
-            st.subheader("📋 Rozpoznane dokumenty")
-            cols = st.columns(max(len(doc_mapping), 1))
+            def update_progress(val, msg):
+                progress_bar.progress(int(10 + val * 20))
+                status_text.info(f"📄 {msg}")
+
+            # Rozdziel PDF, DOCX i XLSX
+            pdf_files = [f for f in uploaded_files if f.name.lower().endswith(".pdf")]
+            docx_files = [f for f in uploaded_files if f.name.lower().endswith(".docx")]
+            xlsx_files = [f for f in uploaded_files if f.name.lower().endswith(".xlsx")]
+
+            parsed = {}
+            if pdf_files:
+                parsed = parse_documents(pdf_files, update_progress)
+            for df in docx_files:
+                parsed[df.name] = extract_text_from_docx(df.getvalue())
+            for xf in xlsx_files:
+                parsed[xf.name] = extract_text_from_xlsx(xf.getvalue())
+
+            st.session_state["parsed_docs"] = parsed
+
+            # Parsowanie dokumentów za rok poprzedni (jeśli wgrano)
+            parsed_prev = {}
+            prev_files = uploaded_prev if uploaded_prev else []
+            if prev_files:
+                status_text.info("📄 Parsowanie dokumentów za rok poprzedni...")
+                prev_pdf = [f for f in prev_files if f.name.lower().endswith(".pdf")]
+                prev_docx = [f for f in prev_files if f.name.lower().endswith(".docx")]
+                prev_xlsx = [f for f in prev_files if f.name.lower().endswith(".xlsx")]
+                if prev_pdf:
+                    parsed_prev = parse_documents(prev_pdf)
+                for df in prev_docx:
+                    parsed_prev[df.name] = extract_text_from_docx(df.getvalue())
+                for xf in prev_xlsx:
+                    parsed_prev[xf.name] = extract_text_from_xlsx(xf.getvalue())
+            st.session_state["parsed_prev"] = parsed_prev
+        else:
+            parsed = st.session_state["parsed_docs"]
+
+        parsed_prev = st.session_state.get("parsed_prev", {})
+        progress_bar.progress(30)
+
+        # ── KROK 2: Mapowanie (cache w session_state) ────────────────────
+        if "doc_mapping" not in st.session_state:
+            status_text.info("🗂️ Krok 2/5: Mapowanie i identyfikacja dokumentów...")
+            progress_bar.progress(40)
+            doc_mapping = map_documents(parsed)
+            st.session_state["doc_mapping"] = doc_mapping
+        else:
+            doc_mapping = st.session_state["doc_mapping"]
+
+        # ── SPRAWDZENIE BRAKUJĄCYCH DOKUMENTÓW ─────────────────────────────
+        missing = check_missing_documents(doc_mapping)
+        if missing:
+            progress_bar.empty()
+            status_text.empty()
+
+            st.warning("⚠️ Nie znaleziono wszystkich dokumentów w wgranych plikach.")
+
+            st.markdown("**Brakujące dokumenty:**")
+            for dt in missing:
+                info = REQUIRED_DOC_TYPES[dt]
+                st.markdown(
+                    f"- {info['icon']} **{info['label']}** — {info['desc']}"
+                )
+
+            st.markdown("---")
+            st.markdown("**Co chcesz zrobić?**")
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("▶️ Kontynuuj bez brakujących dokumentów",
+                              use_container_width=True, type="primary"):
+                    st.session_state["missing_decision"] = "continue"
+                    st.rerun()
+            with col_b:
+                if st.button("📁 Anuluj — chcę dodać brakujące pliki",
+                              use_container_width=True):
+                    st.session_state["missing_decision"] = "cancel"
+                    st.rerun()
+
+            st.info(
+                "💡 Wskazówka: Jeśli plik zawiera kilka dokumentów w jednym PDF "
+                "(np. Bilans + RZiS razem), aplikacja może nie rozpoznać drugiego. "
+                "Spróbuj wgrać je jako osobne pliki."
+            )
+            st.stop()
+
+        # Jeśli użytkownik wrócił po decyzji
+        decision = st.session_state.pop("missing_decision", None)
+        if decision == "cancel":
+            st.session_state.pop("run_generation", None)
+            st.session_state.pop("parsed_docs", None)
+            st.session_state.pop("doc_mapping", None)
+            st.info("Wgraj brakujące pliki i uruchom ponownie.")
+            st.stop()
+
+        # (decision == "continue" lub brak braków — kontynuuj normalnie)
+
+        # ── PYTANIA O POLITYKĘ RACHUNKOWOŚCI (gdy brak dokumentu) ──────────
+        types_found = {d["type"] for d in doc_mapping.values()}
+        if "POLITYKA RACHUNKOWOŚCI" not in types_found:
+            # Sprawdź czy pytania już zostały wypełnione
+            if not st.session_state.get("polityka_answers"):
+                progress_bar.empty()
+                status_text.empty()
+
+                st.warning(
+                    "📜 Nie załączono dokumentu **Polityki Rachunkowości**. "
+                    "Odpowiedz na poniższe pytania — zostaną one wykorzystane "
+                    "przy sporządzaniu sekcji 1.2–1.5 Informacji Dodatkowej."
+                )
+
+                with st.form("polityka_form"):
+                    st.subheader("📋 Zasady rachunkowości — pytania uzupełniające")
+
+                    q1 = st.selectbox(
+                        "1. Zasady ustalania wyniku finansowego:",
+                        options=[
+                            "Wariant porównawczy (układ rodzajowy kosztów)",
+                            "Wariant kalkulacyjny (układ funkcjonalny kosztów)",
+                        ],
+                        help="Dotyczy formy Rachunku Zysków i Strat (art. 47 UoR)"
+                    )
+
+                    q2_wycena = st.selectbox(
+                        "2a. Metoda wyceny zapasów:",
+                        options=[
+                            "FIFO (pierwsze weszło, pierwsze wyszło)",
+                            "LIFO (ostatnie weszło, pierwsze wyszło)",
+                            "Cena przeciętna (średnia ważona)",
+                            "Ceny ewidencyjne z odchyleniami",
+                            "Nie dotyczy (brak zapasów)",
+                        ]
+                    )
+
+                    q2_st = st.selectbox(
+                        "2b. Metoda amortyzacji środków trwałych:",
+                        options=[
+                            "Liniowa (równomierne odpisy przez cały okres)",
+                            "Degresywna (przyspieszone odpisy na początku)",
+                            "Jednorazowy odpis (niskocenne ST do 10 000 zł)",
+                            "Mieszana (liniowa i jednorazowa)",
+                        ]
+                    )
+
+                    q2_nal = st.selectbox(
+                        "2c. Wycena należności:",
+                        options=[
+                            "W wartości nominalnej z odpisami aktualizującymi",
+                            "W wartości nominalnej bez odpisów aktualizujących",
+                            "W wartości godziwej",
+                        ]
+                    )
+
+                    q3 = st.selectbox(
+                        "3. Sposób sporządzania sprawozdania finansowego:",
+                        options=[
+                            "Pełne sprawozdanie finansowe (standardowe)",
+                            "Uproszczone sprawozdanie finansowe (art. 46 ust. 5 UoR — jednostki małe)",
+                            "Sprawozdanie według Załącznika nr 4 UoR (mikro jednostki)",
+                            "Sprawozdanie według Załącznika nr 5 UoR (małe jednostki NGO)",
+                        ],
+                        help="Jednostki małe mogą stosować uproszczenia zgodnie z art. 46–50 UoR"
+                    )
+
+                    q4_podatek = st.checkbox(
+                        "Jednostka tworzy rezerwę i aktywa z tytułu odroczonego podatku dochodowego",
+                        value=True
+                    )
+
+                    q5_leasing = st.selectbox(
+                        "Ujęcie leasingu:",
+                        options=[
+                            "Według UoR (leasing operacyjny/finansowy wg ekonomicznej treści)",
+                            "Leasing operacyjny — wszystkie umowy traktowane jako operacyjny",
+                            "Nie dotyczy (brak umów leasingowych)",
+                        ]
+                    )
+
+                    uwagi = st.text_area(
+                        "Dodatkowe uwagi dotyczące polityki rachunkowości (opcjonalnie):",
+                        placeholder="np. szczególne zasady wyceny, zmiany polityki w roku obrotowym...",
+                        height=80
+                    )
+
+                    submitted = st.form_submit_button(
+                        "✅ Zatwierdź i kontynuuj generowanie",
+                        use_container_width=True, type="primary"
+                    )
+
+                if submitted:
+                    st.session_state["polityka_answers"] = {
+                        "wynik_finansowy": q1,
+                        "wycena_zapasow": q2_wycena,
+                        "amortyzacja": q2_st,
+                        "wycena_naleznosci": q2_nal,
+                        "sposob_sprawozdania": q3,
+                        "podatek_odroczony": q4_podatek,
+                        "leasing": q5_leasing,
+                        "uwagi": uwagi,
+                    }
+                    st.rerun()
+                else:
+                    st.stop()
+
+        # Pobierz odpowiedzi na pytania (jeśli były zadane)
+        polityka_answers = st.session_state.get("polityka_answers", {})
+
+        # ── KROK 3: Walidacja ───────────────────────────────────────────────
+        status_text.info("✅ Krok 3/5: Walidacja spójności danych...")
+        progress_bar.progress(55)
+        validation_issues = validate_data_consistency(doc_mapping)
+
+        with results_container:
+            st.subheader("📋 Raport mapowania i walidacji")
+            map_cols = st.columns(min(len(doc_mapping), 4))
             for i, (fname, ddata) in enumerate(doc_mapping.items()):
-                with cols[i % len(cols)]:
-                    st.markdown(f'<div class="metric-box"><b>{ddata["type"]}</b><br>'
-                                f'<small>{fname}</small><br>'
-                                f'<small>{ddata["length"]:,} znaków</small></div>',
-                                unsafe_allow_html=True)
-            st.subheader("🔎 Walidacja")
-            css = {"OK":"validation-ok","WARN":"validation-warn","ERR":"validation-err"}
-            for issue in issues:
-                st.markdown(f'<span class="{css.get(issue["level"],"")}">{ issue["msg"]}</span>',
+                with map_cols[i % len(map_cols)]:
+                    st.markdown(f"""
+                    <div class="metric-box">
+                        <b>{ddata['type']}</b><br>
+                        <small>{fname}</small><br>
+                        <small>{ddata['length']:,} znaków</small>
+                    </div>""", unsafe_allow_html=True)
+
+            st.subheader("🔎 Walidacja danych")
+            for issue in validation_issues:
+                css = {"OK": "validation-ok", "WARN": "validation-warn", "ERR": "validation-err"}
+                st.markdown(f'<span class="{css.get(issue["level"], "")}">{issue["msg"]}</span>',
                             unsafe_allow_html=True)
 
-        # Generowanie
-        st_txt.info("🤖 Generowanie przez Claude 3.5 Sonnet (1–3 min)...")
-        pb.progress(65)
+        # ── KROK 3B: Dobór not objaśniających ────────────────────────────
+        status_text.info("📋 Krok 3b/5: Dobór not objaśniających...")
+        progress_bar.progress(58)
+        _ci_for_notes = {"forma_prawna": company_forma}
+        selected_notes = select_applicable_notes(doc_mapping, _ci_for_notes)
+
+        with results_container:
+            st.subheader(f"📝 Dobrano {len(selected_notes)} not objaśniających")
+            for n in selected_notes:
+                prio = {1: "🔴", 2: "🟡", 3: "⚪"}.get(n["priority"], "")
+                st.markdown(f'{prio} Nota {n["nr"]}: {n["name"]} — {n["reason"]}')
+
+        # ── KROK 4: Generowanie ─────────────────────────────────────────────
+        status_text.info("🤖 Krok 4/5: Generowanie przez Claude (może potrwać 1-2 min)...")
+        progress_bar.progress(65)
 
         company_info = {
-            "nazwa": company_name,         "siedziba": company_siedziba,
-            "nip": company_nip,             "krs": company_krs,
-            "regon": company_regon,         "pkd": company_pkd,
-            "data_rejestracji": company_data_rej, "forma_prawna": company_forma,
-            "okres_od": str(okres_od),      "okres_do": str(okres_do),
+            "nazwa": company_name,
+            "siedziba": company_siedziba,
+            "nip": company_nip,
+            "krs": company_krs,
+            "regon": company_regon,
+            "pkd": company_pkd,
+            "data_rejestracji": company_data_rej,
+            "forma_prawna": company_forma,
+            "okres_od": str(okres_od),
+            "okres_do": str(okres_do),
             "zagrozenie_kontynuacji": zagrozenie_kontynuacji,
             "zagrozenie_opis": zagrozenie_opis,
             "polityka_answers": polityka_answers,
             "zatrudnienie_biezacy": zatrudnienie_biezacy,
             "zatrudnienie_poprzedni": zatrudnienie_poprzedni,
             "zatrudnienie_uwagi": zatrudnienie_uwagi,
+            "selected_notes": selected_notes,
+            "wynagrodzenie_audytora": wynagrodzenie_audytora,
+            "kapital_podstawowy": kapital_podstawowy,
+            "wspolnicy": [
+                {"nazwa": w["nazwa"], "liczba_udzialow": w["rola"], "wartosc_udzialow": w["wartosc"]}
+                for w in wspolnicy_edit
+            ],
+            "prev_year_docs": map_documents(parsed_prev) if parsed_prev else {},
         }
-
         generated_text = generate_accounting_notes(
             doc_mapping=doc_mapping,
             anthropic_api_key=anthropic_key,
             company_name=company_name,
             year=fiscal_year,
             company_info=company_info,
-            progress_callback=lambda v, m: pb.progress(int(65 + v * 15))
+            progress_callback=lambda v, m: progress_bar.progress(int(65 + v * 20))
         )
-        pb.progress(82)
+        st.session_state["generated_text"] = _strip_chart_data(generated_text)
+        progress_bar.progress(88)
 
-        # Wykresy
-        st_txt.info("📊 Generowanie wykresów...")
-        clean_text  = _sanitize_text(generated_text)
-        chart_data  = _parse_chart_data(clean_text)
-        charts      = build_charts(chart_data, fiscal_year) if chart_data else []
-        pb.progress(92)
+        # ── KROK 5: Eksport do Word ─────────────────────────────────────────
+        status_text.info("💾 Krok 5/5: Generowanie pliku Word...")
+        docx_bytes = save_to_word(generated_text, company_name, fiscal_year, company_info)
+        st.session_state["docx_bytes"] = docx_bytes
+        progress_bar.progress(100)
+        status_text.success("✅ Informacja Dodatkowa wygenerowana pomyślnie!")
+        st.session_state.pop("run_generation", None)
+        st.session_state.pop("parsed_docs", None)
+        st.session_state.pop("doc_mapping", None)
 
-        # Word
-        st_txt.info("💾 Zapis do Word...")
-        try:
-            docx_bytes = save_to_word(clean_text, company_name, fiscal_year, charts)
-        except Exception as docx_err:
-            import traceback
-            st.error(f"❌ Błąd Word: {docx_err}")
-            st.code(traceback.format_exc())
-            st.stop()
+        # ── Podgląd i pobieranie ────────────────────────────────────────────
+        with results_container:
+            st.divider()
+            dl_col, _ = st.columns([1, 2])
+            with dl_col:
+                st.download_button(
+                    label="⬇️ Pobierz Informację Dodatkową (.docx)",
+                    data=docx_bytes,
+                    file_name=f"informacja_dodatkowa_{company_name.replace(' ', '_')}_{fiscal_year}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    type="primary",
+                    use_container_width=True
+                )
 
-        st.session_state["generated_text"] = generated_text
-        st.session_state["docx_bytes"]     = docx_bytes
-        pb.progress(100)
-        st_txt.success("✅ Informacja Dodatkowa wygenerowana!")
-        _set_state("done"); st.rerun()
+            with st.expander("👁️ Podgląd wygenerowanej treści", expanded=True):
+                st.markdown(_strip_chart_data(generated_text))
 
     except anthropic.AuthenticationError:
-        _set_state("error"); st.session_state["error_msg"] = "Nieprawidłowy klucz API."
-        st.rerun()
+        st.session_state.pop("run_generation", None)
+        st.session_state.pop("parsed_docs", None)
+        st.session_state.pop("doc_mapping", None)
+        st.error("❌ Nieprawidłowy klucz API Anthropic. Sprawdź wartość w panelu bocznym.")
     except anthropic.RateLimitError:
-        _set_state("error"); st.session_state["error_msg"] = "Limit API — poczekaj chwilę."
-        st.rerun()
+        st.session_state.pop("run_generation", None)
+        st.session_state.pop("parsed_docs", None)
+        st.session_state.pop("doc_mapping", None)
+        st.error("❌ Przekroczono limit zapytań API. Poczekaj chwilę i spróbuj ponownie.")
     except Exception as e:
-        _set_state("error"); st.session_state["error_msg"] = str(e); st.rerun()
+        st.session_state.pop("run_generation", None)
+        st.session_state.pop("parsed_docs", None)
+        st.session_state.pop("doc_mapping", None)
+        st.error(f"❌ Błąd: {e}")
+        st.exception(e)
 
-# ── STAN: done ────────────────────────────────────────────────────────────────
-elif _get_state() == "done":
-    st.success("✅ Informacja Dodatkowa wygenerowana!")
-    col_dl, _ = st.columns([1, 2])
-    with col_dl:
+# ── Jeśli wyniki już są w sesji ──────────────────────────────────────────────
+elif "generated_text" in st.session_state:
+    st.info("📝 Wyniki z poprzedniego uruchomienia (wgraj nowe pliki lub wciśnij Generuj ponownie).")
+    if st.session_state.get("docx_bytes"):
         st.download_button(
-            "⬇️ Pobierz (.docx)",
+            label="⬇️ Pobierz poprzedni wynik (.docx)",
             data=st.session_state["docx_bytes"],
-            file_name=f"informacja_dodatkowa_{company_name.replace(' ','_')}_{fiscal_year}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            type="primary", use_container_width=True
+            file_name=f"informacja_dodatkowa_{fiscal_year}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
-    if st.button("🔄 Generuj dla innej spółki", use_container_width=True):
-        _reset_state(); st.rerun()
-    with st.expander("👁️ Podgląd treści", expanded=False):
+    with st.expander("👁️ Poprzednio wygenerowana treść"):
         st.markdown(st.session_state["generated_text"])
-
-# ── STAN: error ───────────────────────────────────────────────────────────────
-elif _get_state() == "error":
-    st.error(f"❌ {st.session_state.get('error_msg','Nieznany błąd')}")
-    if st.button("🔄 Spróbuj ponownie"):
-        _reset_state(); st.rerun()
