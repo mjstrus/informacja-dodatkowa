@@ -886,7 +886,7 @@ NOTA_RULES = {
     22: {"name": "Rozliczenia międzyokresowe przychodów", "source": ["ZOiS"], "category": "warunkowe", "priority": 2, "zois_keywords": ["840", "845", "rozliczenia międzyokresowe przychod"]},
     29: {"name": "Struktura rzeczowa i terytorialna przychodów", "source": ["RZiS", "ZOiS"], "category": "auto", "priority": 1},
     31: {"name": "Koszty rodzajowe (porównanie rok bieżący vs poprzedni)", "source": ["RZiS"], "category": "auto", "priority": 1},
-    35: {"name": "Rozliczenie różnicy CIT vs wynik finansowy", "source": ["RZiS", "ZOiS"], "category": "auto", "priority": 1},
+    35: {"name": "Rozliczenie różnicy CIT vs wynik finansowy", "source": ["RZiS"], "category": "auto", "priority": 1},
     40: {"name": "Kursy walut przyjęte do wyceny", "source": ["ZOiS"], "category": "warunkowe", "priority": 2, "zois_keywords": ["walut", "kursow", "EUR", "USD", "GBP"]},
     41: {"name": "Struktura środków pieniężnych", "source": ["ZOiS"], "category": "auto", "priority": 1},
     57: {"name": "Różnica zobowiązań krótkoterminowych (bilans vs przepływy)", "source": ["BILANS", "PRZEPŁYWY PIENIĘŻNE"], "category": "auto", "priority": 2, "require_all_sources": True},
@@ -1041,10 +1041,16 @@ STRUKTURA DOKUMENTU (obowiązkowa):
    1.6 Korekty błędów i zmiany polityki rachunkowości
 
 2. DODATKOWE INFORMACJE I OBJAŚNIENIA
-   Generuj KAŻDĄ notę wymienioną w sekcji "NOTY DO WYGENEROWANIA" jako PEŁNĄ notę z:
-   - tytułem: "Nota X. [tytuł]"
-   - treścią opisową lub TABELĄ MARKDOWN z danymi z dokumentów
-   NIE twórz spisu treści. Każda nota musi mieć RZECZYWISTĄ TREŚĆ z liczbami lub opisem.
+   Generuj KAŻDĄ notę jako PEŁNĄ sekcję. Przykład poprawnego formatu:
+
+   ## Nota 1. Zmiana wartości środków trwałych
+   | Grupa | Wartość brutto BO | Zwiększenia | Zmniejszenia | Wartość brutto BZ | Umorzenie | Wartość netto |
+   |---|---|---|---|---|---|---|
+   | Maszyny | 100 000,00 | 20 000,00 | 0,00 | 120 000,00 | 30 000,00 | 90 000,00 |
+
+   ZAKAZ generowania samych tytułów not bez treści.
+   ZAKAZ list "Nota 1. ...\nNota 2. ...\nNota 3. ..." — to jest spis treści, nie informacja dodatkowa.
+   Każda nota = tytuł + tabela z danymi LUB opis z kwotami. Minimum 3 linijki treści na notę.
 
    OBOWIĄZKOWE NOTY (generuj zawsze jeśli masz RZiS):
 
@@ -1062,18 +1068,23 @@ STRUKTURA DOKUMENTU (obowiązkowa):
    Dane wyciągnij z RZiS — kolumna rok bieżący i kolumna rok poprzedni.
 
    NOTA: ROZLICZENIE RÓŻNICY MIĘDZY WYNIKIEM PODATKOWYM A BILANSOWYM:
-   Wygeneruj tabelę uzgodnienia wyniku finansowego brutto z podstawą opodatkowania CIT:
-   | Pozycja | Kwota (PLN) |
-   | Wynik finansowy brutto (zysk/strata przed opodatkowaniem) | X |
-   | Koszty niestanowiące kosztów uzyskania przychodów (NKUP) | + X |
-   | Przychody niepodatkowe | - X |
-   | Inne korekty trwałe | +/- X |
-   | Podstawa opodatkowania (dochód do opodatkowania) | X |
-   | Stawka CIT (19% lub 9% dla małego podatnika) | % |
-   | Podatek dochodowy należny (wg deklaracji) | X |
+   Wygeneruj tabelę uzgodnienia. Jeśli masz ZOiS — wyciągnij NKUP z kont kosztów podatkowych.
+   Jeśli brak ZOiS — wstaw wiersz NKUP z adnotacją "wg ewidencji podatkowej".
+   | Wyszczególnienie | Kwota (PLN) |
+   | Wynik finansowy brutto (przed opodatkowaniem) | X |
+   | + Koszty niestanowiące kosztów uzyskania przychodów (NKUP) | + X |
+   |   w tym: amortyzacja bilansowa ponad podatkową | X |
+   |   w tym: kary, grzywny, odsetki od zaległości | X |
+   |   w tym: reprezentacja | X |
+   |   w tym: pozostałe NKUP | X |
+   | − Przychody niepodatkowe (np. dotacje, umorzenia) | − X |
+   | +/− Inne różnice trwałe | +/− X |
+   | = Podstawa opodatkowania (dochód podatkowy) | X |
+   | Stawka CIT | % |
+   | Podatek dochodowy należny | X |
    | Podatek dochodowy wykazany w RZiS | X |
-   | Różnica (podatek odroczony) | X |
-   Dane z RZiS (wynik brutto, podatek) i ZOiS (NKUP z kont 403/koszty nieodliczalne).
+   | Różnica (podatek odroczony netto) | X |
+   | Efektywna stopa podatkowa | % |
 
 STYL: Profesjonalne słownictwo, PLN z dokładnością do groszy, tryb oznajmujący.
 - Tabele generuj w formacie MARKDOWN (| kolumna1 | kolumna2 |)
@@ -1179,6 +1190,14 @@ Na podstawie powyższych wypełnij sekcje 1.2–1.5.""".format(
     wyn_aud = info.get("wynagrodzenie_audytora", "")
     if wyn_aud:
         context_parts.append(f"💰 WYNAGRODZENIE FIRMY AUDYTORSKIEJ: {wyn_aud} PLN")
+
+    # Stawka CIT — wynika z rodzaju sprawozdania lub weryfikacji z RZiS
+    sposob_spr = pa.get("sposob_sprawozdania", "") if pa else ""
+    if "mikro" in sposob_spr.lower() or "małe" in sposob_spr.lower() or "małej" in sposob_spr.lower():
+        stawka_cit = "9% (jednostka mała/mikro)"
+    else:
+        stawka_cit = "19% (lub 9% jeśli mały podatnik — zweryfikuj przychody z RZiS)"
+    context_parts.append(f"🧾 STAWKA CIT DO ZASTOSOWANIA: {stawka_cit}")
 
     context_parts.append(polityka_blok)
     context_parts.append(zagrozenie_blok)
