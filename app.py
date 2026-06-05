@@ -117,13 +117,29 @@ def extract_text_from_docx(docx_bytes: bytes) -> str:
 
 
 def extract_text_from_xlsx(xlsx_bytes: bytes) -> str:
-    """Wyciąga tekst z pliku XLSX (wszystkie arkusze, wiersze jako tekst)."""
+    """Wyciąga tekst z pliku XLSX z poprawnym formatowaniem liczb."""
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
     parts = []
     for ws in wb.worksheets:
         for row in ws.iter_rows(values_only=True):
-            vals = [str(v).strip() if v is not None else "" for v in row]
+            vals = []
+            for v in row:
+                if v is None:
+                    vals.append("")
+                elif isinstance(v, float):
+                    # Zaokrąglij do 2 miejsc, usuń nadmiarową precyzję
+                    rounded = round(v, 2)
+                    if rounded == int(rounded):
+                        vals.append(f"{int(rounded):,}".replace(",", " "))
+                    else:
+                        # Format polski: spacja jako separator tysięcy, przecinek dziesiętny
+                        formatted = f"{rounded:,.2f}".replace(",", " ").replace(".", ",")
+                        vals.append(formatted)
+                elif isinstance(v, int):
+                    vals.append(str(v))
+                else:
+                    vals.append(str(v).strip())
             line = " | ".join(v for v in vals if v)
             if line.strip():
                 parts.append(line)
@@ -647,15 +663,15 @@ def validate_data_consistency(doc_mapping: dict, company_nip: str = "") -> list:
     # Symfonia: "Suma 1.023.905,39 619.466,88 ..." na końcu bilansu
     # Inne: "AKTYWA RAZEM", "PASYWA RAZEM"
     def _find_balance_sum(text):
-        # Format Symfonia: linia "Suma X Y Z" (ostatnia liczba to suma bilansowa)
-        m = re.findall(r"^Suma\s+([\d\s.,]+)", text, re.MULTILINE | re.IGNORECASE)
+        # Format Excel z rurami: "Suma | 1 242 216,90 | ..."
+        m = re.findall(r"^Suma\s*[\|]?\s*([\d\s,\.]+)", text, re.MULTILINE | re.IGNORECASE)
         if m:
             try:
-                val = m[-1].strip().split()[0].replace(".", "").replace(",", ".")
+                val = m[-1].strip().split()[0].replace(" ", "").replace(",", ".")
                 return float(val)
             except Exception:
                 pass
-        # Klasyczny format
+        # Klasyczny format PDF bez rur
         return (
             extract_financial_number(text, r"AKTYWA\s+RAZEM|suma\s+aktywów") or
             extract_financial_number(text, r"Aktywa razem|SUMA AKTYWÓW")
@@ -893,6 +909,20 @@ STRUKTURA DOKUMENTU (obowiązkowa):
    Pozycje: Przychody netto ze sprzedaży produktów/usług, Przychody ze sprzedaży towarów,
    Pozostałe przychody operacyjne, Przychody finansowe, RAZEM przychody.
    Dane wyciągnij z RZiS — kolumna rok bieżący i kolumna rok poprzedni.
+
+   NOTA: ROZLICZENIE RÓŻNICY MIĘDZY WYNIKIEM PODATKOWYM A BILANSOWYM:
+   Wygeneruj tabelę uzgodnienia wyniku finansowego brutto z podstawą opodatkowania CIT:
+   | Pozycja | Kwota (PLN) |
+   | Wynik finansowy brutto (zysk/strata przed opodatkowaniem) | X |
+   | Koszty niestanowiące kosztów uzyskania przychodów (NKUP) | + X |
+   | Przychody niepodatkowe | - X |
+   | Inne korekty trwałe | +/- X |
+   | Podstawa opodatkowania (dochód do opodatkowania) | X |
+   | Stawka CIT (19% lub 9% dla małego podatnika) | % |
+   | Podatek dochodowy należny (wg deklaracji) | X |
+   | Podatek dochodowy wykazany w RZiS | X |
+   | Różnica (podatek odroczony) | X |
+   Dane z RZiS (wynik brutto, podatek) i ZOiS (NKUP z kont 403/koszty nieodliczalne).
 
 STYL: Profesjonalne słownictwo, PLN z dokładnością do groszy, tryb oznajmujący.
 - Tabele generuj w formacie MARKDOWN (| kolumna1 | kolumna2 |)
