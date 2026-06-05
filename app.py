@@ -154,7 +154,7 @@ def extract_text_from_xlsx(xlsx_bytes: bytes) -> str:
 # Endpoint: GET /api/krs/OdpisAktualny/{nrKRS}?rejestr=P&format=json
 # Bezpłatne, bez klucza API.
 
-def parse_krs_from_file(file_bytes: bytes, filename: str) -> dict | None:
+def parse_krs_from_file(file_bytes: bytes, filename: str):
     """
     Parsuje odpis KRS z pliku JSON lub PDF.
     JSON: ta sama struktura co API — reużywa _parse_odpis().
@@ -351,7 +351,7 @@ def fetch_krs_by_krs_nr_debug(krs_nr: str) -> tuple:
     return None, "\n".join(log)
 
 
-def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
+def _parse_odpis(data: dict, krs_nr: str = "") :
     """Wyciąga potrzebne pola z odpisu JSON zwróconego przez API KRS.
     Struktura rzeczywista: odpis.dane.dzial1.danePodmiotu / siedzibaIAdres / przedmiotDzialalnosci
     """
@@ -744,7 +744,7 @@ def _preprocess_srodki_trwale(text: str) -> str:
 # MODUŁ 3: WALIDACJA SPÓJNOŚCI DANYCH
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def extract_financial_number(text: str, pattern: str) -> float | None:
+def extract_financial_number(text: str, pattern: str) :
     """Wyciąga liczbę z tekstu na podstawie wzorca."""
     try:
         matches = re.findall(
