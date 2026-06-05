@@ -877,8 +877,7 @@ NOTA_RULES = {
     12: {"name": "Struktura własności kapitału podstawowego (sp. z o.o.)", "source": [], "category": "auto", "priority": 1, "forma_prawna": ["SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ"]},
     13: {"name": "Zmiany stanów kapitałów zapasowego i rezerwowego", "source": ["ZOiS", "BILANS"], "category": "auto", "priority": 1},
     14: {"name": "Zmiany w stanie kapitału z aktualizacji wyceny", "source": ["ZOiS"], "category": "warunkowe", "priority": 2, "zois_keywords": ["803", "aktualizacja wyceny"]},
-    15: {"name": "Propozycja podziału zysku za rok obrotowy", "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 1, "ankieta_trigger": "q6_zysk"},
-    16: {"name": "Propozycja pokrycia straty za rok obrotowy", "source": ["ANKIETA BILANSOWA"], "category": "ankieta", "priority": 1, "ankieta_trigger": "q7_strata"},
+    15: {"name": "Propozycja podziału zysku / pokrycia straty za rok obrotowy", "source": ["RZiS", "BILANS"], "category": "auto", "priority": 1},
     17: {"name": "Rezerwy na koszty i zobowiązania", "source": ["ZOiS", "BILANS"], "category": "auto", "priority": 1},
     18: {"name": "Odroczony podatek dochodowy", "source": ["ZOiS"], "category": "auto", "priority": 1, "zois_keywords": ["650", "841", "odroczony"]},
     19: {"name": "Zobowiązania według okresów wymagalności", "source": ["ZOiS", "BILANS"], "category": "auto", "priority": 1},
@@ -1053,6 +1052,13 @@ STRUKTURA DOKUMENTU (obowiązkowa):
    Każda nota = tytuł + tabela z danymi LUB opis z kwotami. Minimum 3 linijki treści na notę.
 
    OBOWIĄZKOWE NOTY (generuj zawsze jeśli masz RZiS):
+
+   NOTA: PODZIAŁ ZYSKU / POKRYCIE STRATY:
+   Sprawdź bilans: Zysk (strata) netto (poz. VI kapitałów własnych).
+   Jeśli zysk > 0: wygeneruj notę "Propozycja podziału zysku netto za rok [rok]" z kwotą zysku z bilansu.
+   Jeśli strata: wygeneruj notę "Propozycja pokrycia straty za rok [rok]" z kwotą straty.
+   Jeśli ankieta bilansowa zawiera decyzję wspólników — użyj jej. Jeśli brak ankiety — napisz:
+   "Na dzień sporządzenia sprawozdania wspólnicy nie podjęli uchwały o podziale zysku/pokryciu straty. Kwota [X] PLN pozostaje do dyspozycji wspólników."
 
    NOTA: KOSZTY RODZAJOWE — tabela porównawcza rok bieżący vs poprzedni:
    | Pozycja | Rok bieżący (PLN) | Rok poprzedni (PLN) |
