@@ -154,6 +154,24 @@ def extract_text_from_xlsx(xlsx_bytes: bytes) -> str:
 # Endpoint: GET /api/krs/OdpisAktualny/{nrKRS}?rejestr=P&format=json
 # Bezpłatne, bez klucza API.
 
+def fetch_krs_by_krs_nr(krs_nr: str):
+    """Pobiera dane spółki z API KRS po numerze KRS. Zwraca dict lub None."""
+    krs_clean = re.sub(r"\D", "", str(krs_nr)).zfill(10)
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    for rejestr in ["P", "S"]:
+        url = f"https://api-krs.ms.gov.pl/api/krs/OdpisAktualny/{krs_clean}?rejestr={rejestr}&format=json"
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+            if r.status_code == 200:
+                data = r.json()
+                parsed = _parse_odpis(data, krs_clean)
+                if parsed:
+                    return parsed
+        except Exception:
+            continue
+    return None
+
+
 def parse_krs_from_file(file_bytes: bytes, filename: str):
     """
     Parsuje odpis KRS z pliku JSON lub PDF.
