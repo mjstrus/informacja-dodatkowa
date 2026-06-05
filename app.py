@@ -154,7 +154,129 @@ def extract_text_from_xlsx(xlsx_bytes: bytes) -> str:
 # Endpoint: GET /api/krs/OdpisAktualny/{nrKRS}?rejestr=P&format=json
 # Bezpłatne, bez klucza API.
 
-def fetch_krs_by_krs_nr(krs_nr: str) -> dict | None:
+def parse_krs_from_file(file_bytes: bytes, filename: str) -> dict | None:
+    """
+    Parsuje odpis KRS z pliku JSON lub PDF.
+    JSON: ta sama struktura co API — reużywa _parse_odpis().
+    PDF: wyciąga dane tekstem przez pypdf.
+    """
+    ext = filename.lower().rsplit(".", 1)[-1]
+
+    # ── JSON ──────────────────────────────────────────────────────────────
+    if ext == "json":
+        try:
+            data = json.loads(file_bytes.decode("utf-8"))
+            # Wyciągnij numer KRS z pliku
+            krs_nr = (data.get("odpis", {})
+                      .get("naglowekA", {})
+                      .get("numerKRS", ""))
+            return _parse_odpis(data, krs_nr)
+        except Exception as e:
+            return None
+
+    # ── PDF ───────────────────────────────────────────────────────────────
+    if ext == "pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(file_bytes))
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            return _parse_krs_pdf_text(text)
+        except Exception:
+            return None
+
+    return None
+
+
+def _parse_krs_pdf_text(text: str) -> dict:
+    """Wyciąga dane z tekstu odpisu KRS (PDF z prs.ms.gov.pl)."""
+    result = {
+        "nazwa": "", "siedziba": "", "nip": "", "krs": "",
+        "regon": "", "pkd": "", "data_rejestracji": "", "forma_prawna": "",
+        "kapital_podstawowy": "", "wspolnicy": [],
+    }
+
+    # Nazwa — pierwsza linia lub po "Nazwa:"
+    m = re.search(r"Nazwa[:\s]+([A-ZŁÓŚĄĘŹŻĆŃ][^\n]{5,80})", text, re.IGNORECASE)
+    if m:
+        result["nazwa"] = m.group(1).strip()
+
+    # NIP
+    m = re.search(r"NIP[:\s]+(\d{10}|\d{3}[-\s]\d{3}[-\s]\d{2}[-\s]\d{2})", text)
+    if m:
+        result["nip"] = re.sub(r"\D", "", m.group(1))
+
+    # KRS
+    m = re.search(r"numer\s+KRS[:\s]+(\d{10})", text, re.IGNORECASE)
+    if m:
+        result["krs"] = m.group(1)
+
+    # REGON
+    m = re.search(r"REGON[:\s]+(\d{9,14})", text)
+    if m:
+        result["regon"] = m.group(1)
+
+    # Forma prawna
+    for fp in ["SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ", "SPÓŁKA KOMANDYTOWA",
+               "SPÓŁKA AKCYJNA", "SPÓŁKA JAWNA", "JEDNOOSOBOWA DZIAŁALNOŚĆ"]:
+        if fp in text.upper():
+            result["forma_prawna"] = fp
+            break
+
+    # Siedziba
+    m = re.search(r"Siedzib[a:][\s:]+([^\n]{5,60})", text, re.IGNORECASE)
+    if m:
+        result["siedziba"] = m.group(1).strip()
+
+    # PKD przeważające
+    m = re.search(r"dzia[łl]\s+(\d{2})[.,]\s*(\d{2})[.,]\s*([A-Z])\s+[-–]\s+([^\n]{10,80})",
+                  text, re.IGNORECASE)
+    if m:
+        result["pkd"] = f"{m.group(1)}.{m.group(2)}.{m.group(3)} — {m.group(4).strip()}"
+
+    # Wspólnicy — wzorzec dla odpisu PDF (imię + nazwisko na jednej linii)
+    # "1. MARCIN KOWALSKI" lub "Imiona i nazwisko: JAN KOWALSKI"
+    wspolnicy = []
+
+    # Format 1: "Imiona i nazwisko / Firma: ..."
+    for m in re.finditer(
+        r"(?:Imiona i nazwisko|Firma|Nazwa)\s*/?\s*(?:Firma)?[:\s]+([A-ZŁÓŚĄĘŹŻĆŃ][A-ZŁÓŚĄĘŹŻĆŃ\s\-\.]{2,60})",
+        text, re.IGNORECASE
+    ):
+        name = m.group(1).strip()
+        if len(name) > 4 and name not in result.get("nazwa", ""):
+            wspolnicy.append(name)
+
+    # Format 2: linie "IMIĘ NAZWISKO" po sekcji "WSPÓLNICY" / "WSPÓLNICY PARTNERZY"
+    sekcja = re.search(r"(?:WSPÓLNICY|KOMANDYTARIUSZE|KOMPLEMENTARIUSZE)[^\n]*\n(.*?)(?:\n[A-Z]{4,}|\Z)",
+                       text, re.DOTALL | re.IGNORECASE)
+    if sekcja and not wspolnicy:
+        for linia in sekcja.group(1).split("\n"):
+            linia = linia.strip()
+            if re.match(r"^[A-ZŁÓŚĄĘŹŻĆŃ]{2,}\s+[A-ZŁÓŚĄĘŹŻĆŃ]{2,}", linia):
+                wspolnicy.append(linia)
+
+    # Pobierz role i wkłady z kontekstu
+    for name in wspolnicy[:10]:
+        rola = ""
+        wartosc = ""
+        pos = text.find(name)
+        if pos > 0:
+            fragment = text[pos:pos+500]
+            if re.search(r"komandytariusz", fragment, re.IGNORECASE):
+                rola = "komandytariusz"
+            elif re.search(r"komplementariusz", fragment, re.IGNORECASE):
+                rola = "komplementariusz"
+            m_w = re.search(r"(\d[\d\s.,]+(?:PLN|ZŁ|zł))", fragment, re.IGNORECASE)
+            if m_w:
+                wartosc = m_w.group(1).strip()
+
+        result["wspolnicy"].append({
+            "nazwa": name,
+            "liczba_udzialow": rola or "wspólnik",
+            "wartosc_udzialow": wartosc,
+        })
+
+    return result
     """
     Pobiera dane spółki z oficjalnego API KRS po numerze KRS (10 cyfr).
     """
@@ -357,6 +479,9 @@ def _parse_odpis(data: dict, krs_nr: str = "") -> dict | None:
                     if isinstance(nazwisko, dict):
                         nazwisko = nazwisko.get("nazwiskoICzlon", nazwisko.get("nazwisko", ""))
                     nazwa_w = f"{imie} {nazwisko}".strip()
+                    # API KRS cenzuruje dane osobowe gwiazdkami — nie zgaduj imion!
+                    if "*" in nazwa_w:
+                        nazwa_w = "[Uzupełnij imię i nazwisko]"
 
                 if not nazwa_w:
                     continue
@@ -663,15 +788,21 @@ def validate_data_consistency(doc_mapping: dict, company_nip: str = "") -> list:
     # Symfonia: "Suma 1.023.905,39 619.466,88 ..." na końcu bilansu
     # Inne: "AKTYWA RAZEM", "PASYWA RAZEM"
     def _find_balance_sum(text):
-        # Format Excel z rurami: "Suma | 1 242 216,90 | ..."
-        m = re.findall(r"^Suma\s*[\|]?\s*([\d\s,\.]+)", text, re.MULTILINE | re.IGNORECASE)
+        m = re.findall(r"^Suma\s*[\|]?\s*([\d\s,\.\|]+)", text, re.MULTILINE | re.IGNORECASE)
         if m:
             try:
-                val = m[-1].strip().split()[0].replace(" ", "").replace(",", ".")
+                raw = m[-1].strip()
+                if "|" in raw:
+                    # Excel: "1 242 216,90 | ..." — spacje jako separator tysięcy
+                    first = raw.split("|")[0].strip()
+                    val = first.replace(" ", "").replace(",", ".")
+                else:
+                    # PDF: "1.023.905,39 619.466,88" — kropki jako separator tysięcy
+                    first = raw.strip().split()[0]
+                    val = first.replace(".", "").replace(",", ".")
                 return float(val)
             except Exception:
                 pass
-        # Klasyczny format PDF bez rur
         return (
             extract_financial_number(text, r"AKTYWA\s+RAZEM|suma\s+aktywów") or
             extract_financial_number(text, r"Aktywa razem|SUMA AKTYWÓW")
@@ -706,8 +837,10 @@ def validate_data_consistency(doc_mapping: dict, company_nip: str = "") -> list:
     for doc_type, info in REQUIRED_DOC_TYPES.items():
         if doc_type in types_found:
             issues.append({"level": "OK", "msg": f"✅ Znaleziono: {info['icon']} {info['label']}"})
+        elif info.get("required", True):
+            issues.append({"level": "WARN", "msg": f"⚠️ Brak dokumentu: {info['icon']} {info['label']}"})
         else:
-            issues.append({"level": "WARN", "msg": f"⚠️ Brak dokumentu: {info['icon']} {info['label']}"}) 
+            issues.append({"level": "WARN", "msg": f"ℹ️ Opcjonalny, nie wgrano: {info['icon']} {info['label']}"})
 
     return issues
 
@@ -1005,6 +1138,7 @@ Na podstawie powyższych wypełnij sekcje 1.2–1.5.""".format(
     if wspolnicy or kapital_podst:
         context_parts.append("\n👥 STRUKTURA WŁASNOŚCI KAPITAŁU (z KRS) — WSTAW DO SEKCJI 1.1:")
         context_parts.append("WAŻNE: Podaj imiona i nazwiska W PEŁNEJ FORMIE. Nie maskuj, nie skracaj, nie zastępuj gwiazdkami.")
+        context_parts.append("KRYTYCZNE: Jeśli nazwa wspólnika to '[Uzupełnij imię i nazwisko]' — zostaw dokładnie ten tekst. NIE wymyślaj ani nie zgaduj imion. Użytkownik uzupełni ręcznie.")
         if kapital_podst:
             context_parts.append(f"Kapitał podstawowy: {kapital_podst} PLN")
         for w in wspolnicy:
@@ -1393,18 +1527,33 @@ with st.sidebar:
                         krs_data = fetch_krs_by_krs_nr(krs_input)
                     if krs_data:
                         st.session_state["krs_data"] = krs_data
-                        st.session_state.pop("wspolnicy_edit", None)  # Reset edytowanych wspólników
-                        st.success("✅ Dane pobrane z KRS!")
+                        st.session_state.pop("wspolnicy_edit", None)
+                        st.success("✅ Dane pobrane z KRS! (imiona mogą być zanonimizowane — uzupełnij ręcznie lub wgraj odpis)")
                     else:
                         st.error("❌ Nie znaleziono. Sprawdź numer KRS lub uzupełnij ręcznie.")
                 except ConnectionError:
                     st.error("❌ Brak połączenia z API KRS.")
                 except TimeoutError:
                     st.error("❌ API KRS nie odpowiada. Spróbuj za chwilę.")
-                except Exception as e:
-                    st.error(f"❌ Błąd: {e}")
-        else:
-            st.warning("Wpisz numer KRS aby pobrać dane.")
+
+    # Alternatywnie — wgraj odpis KRS z pliku (pełne imiona)
+    st.markdown("**lub wgraj odpis KRS z prs.ms.gov.pl:**")
+    krs_file = st.file_uploader(
+        "Odpis KRS (PDF z prs.ms.gov.pl)",
+        type=["pdf"],
+        key="krs_odpis_file",
+        help="Pobierz odpis z prs.ms.gov.pl → 'Pobierz odpis aktualny' → PDF."
+    )
+    if krs_file:
+        with st.spinner("Parsowanie odpisu KRS..."):
+            krs_data_from_file = parse_krs_from_file(krs_file.getvalue(), krs_file.name)
+            if krs_data_from_file:
+                st.session_state["krs_data"] = krs_data_from_file
+                st.session_state.pop("wspolnicy_edit", None)
+                n_wsp = len(krs_data_from_file.get("wspolnicy", []))
+                st.success(f"✅ Wczytano odpis KRS! Znaleziono {n_wsp} wspólników.")
+            else:
+                st.error("❌ Nie udało się sparsować pliku. Sprawdź czy to poprawny odpis KRS.")
 
     krs = st.session_state.get("krs_data", {})
 
