@@ -421,10 +421,25 @@ def _parse_odpis(data: dict, krs_nr: str = "") :
                      sekcja.get("przedmiotDzialalnosci") or [])
             if isinstance(lista, list) and lista:
                 p0 = lista[0]
-                return f"{p0.get('kodDzialalnosci','')} {p0.get('opis','')}".strip()
-            if isinstance(lista, dict):
-                return f"{lista.get('kodDzialalnosci','')} {lista.get('opis','')}".strip()
-            return ""
+            elif isinstance(lista, dict):
+                p0 = lista
+            else:
+                return ""
+            # Buduj kod PKD z komponentów: "47.99.Z"
+            kod_dzial = p0.get("kodDzial", "")
+            kod_klasa = p0.get("kodKlasa", "")
+            kod_podklasa = p0.get("kodPodklasa", "")
+            kod_pelny = p0.get("kodDzialalnosci", "")  # fallback
+            if kod_dzial and kod_klasa:
+                kod = f"{kod_dzial}.{kod_klasa}.{kod_podklasa}".strip(".")
+            elif kod_pelny:
+                kod = kod_pelny
+            else:
+                kod = ""
+            opis = p0.get("opis", "").capitalize()
+            if kod and opis:
+                return f"{kod} — {opis}"
+            return opis or kod
 
         for dzial_key in ["dzial1", "dzial3", "dzial2"]:
             dzial = dane.get(dzial_key, {})
